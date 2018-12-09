@@ -17,7 +17,6 @@ package net.dv8tion.jda.core.entities;
 
 import net.dv8tion.jda.core.exceptions.AccountTypeException;
 import net.dv8tion.jda.core.managers.AccountManager;
-import net.dv8tion.jda.core.managers.AccountManagerUpdatable;
 
 /**
  * Represents the currently logged in account.
@@ -105,20 +104,10 @@ public interface SelfUser extends User
     /**
      * The {@link net.dv8tion.jda.core.managers.AccountManager AccountManager}
      * for the currently logged in account.
-     *
-     * <p>This can be used to atomically set account fields (like avatar/username)
+     * <br>This can be used to atomically set account fields (like avatar/username)
+     * You modify multiple fields in one request by chaining setters before calling {@link net.dv8tion.jda.core.requests.RestAction#queue() RestAction.queue()}.
      *
      * @return An AccountManager instance for the current account
      */
     AccountManager getManager();
-
-    /**
-     * The {@link net.dv8tion.jda.core.managers.AccountManagerUpdatable AccountManagerUpdatable}
-     * for the currently logged in account.
-     *
-     * <p>This can be used to bulk update account fields (like avatar/username)
-     *
-     * @return An AccountManagerUpdatable instance for the current account
-     */
-    AccountManagerUpdatable getManagerUpdatable();
 }

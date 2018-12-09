@@ -18,10 +18,7 @@ package net.dv8tion.jda.core.entities;
 import net.dv8tion.jda.core.AccountType;
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.exceptions.AccountTypeException;
-import net.dv8tion.jda.core.requests.Request;
-import net.dv8tion.jda.core.requests.Response;
-import net.dv8tion.jda.core.requests.RestAction;
-import net.dv8tion.jda.core.requests.Route;
+import net.dv8tion.jda.core.requests.*;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
 import net.dv8tion.jda.core.requests.restaction.MessageAction;
 import net.dv8tion.jda.core.requests.restaction.pagination.MessagePaginationAction;
@@ -32,6 +29,7 @@ import org.json.JSONArray;
 import javax.annotation.CheckReturnValue;
 import java.io.*;
 import java.util.*;
+import java.util.function.Function;
 
 /**
  * Represents a Discord channel that can have {@link net.dv8tion.jda.core.entities.Message Messages} and files sent to it.
@@ -64,7 +62,6 @@ import java.util.*;
  */
 public interface MessageChannel extends ISnowflake, Formattable
 {
-
     /**
      * The id for the most recent message sent
      * in this current MessageChannel.
@@ -81,6 +78,152 @@ public interface MessageChannel extends ISnowflake, Formattable
     default String getLatestMessageId()
     {
         return Long.toUnsignedString(getLatestMessageIdLong());
+    }
+
+    /**
+     * Convenience method to delete messages in the most efficient way available.
+     * <br>This combines both {@link TextChannel#deleteMessagesByIds(Collection)} as well as {@link #deleteMessageById(long)}
+     * to delete all messages provided. No checks will be done to prevent failures, use {@link java.util.concurrent.CompletionStage#exceptionally(Function)}
+     * to handle failures.
+     *
+     * <p>For possible ErrorResponses see {@link #purgeMessagesById(long...)}.
+     *
+     * @param  messageIds
+     *         The message ids to delete
+     *
+     * @return List of futures representing all deletion tasks
+     *
+     * @see    RequestFuture#allOf(Collection)
+     */
+    default List<RequestFuture<Void>> purgeMessagesById(List<String> messageIds)
+    {
+        if (messageIds == null || messageIds.isEmpty())
+            return Collections.emptyList();
+        long[] ids = new long[messageIds.size()];
+        for (int i = 0; i < ids.length; i++)
+            ids[i] = MiscUtil.parseSnowflake(messageIds.get(i));
+        return purgeMessagesById(ids);
+    }
+
+    /**
+     * Convenience method to delete messages in the most efficient way available.
+     * <br>This combines both {@link TextChannel#deleteMessagesByIds(Collection)} as well as {@link #deleteMessageById(long)}
+     * to delete all messages provided. No checks will be done to prevent failures, use {@link java.util.concurrent.CompletionStage#exceptionally(Function)}
+     * to handle failures.
+     *
+     * <p>For possible ErrorResponses see {@link #purgeMessagesById(long...)}.
+     *
+     * @param  messageIds
+     *         The message ids to delete
+     *
+     * @return List of futures representing all deletion tasks
+     *
+     * @see    RequestFuture#allOf(Collection)
+     */
+    default List<RequestFuture<Void>> purgeMessagesById(String... messageIds)
+    {
+        if (messageIds == null || messageIds.length == 0)
+            return Collections.emptyList();
+        return purgeMessagesById(Arrays.asList(messageIds));
+    }
+
+    /**
+     * Convenience method to delete messages in the most efficient way available.
+     * <br>This combines both {@link TextChannel#deleteMessagesByIds(Collection)} as well as {@link Message#delete()}
+     * to delete all messages provided. No checks will be done to prevent failures, use {@link java.util.concurrent.CompletionStage#exceptionally(Function)}
+     * to handle failures.
+     *
+     * <p>For possible ErrorResponses see {@link #purgeMessagesById(long...)}.
+     *
+     * @param  messages
+     *         The messages to delete
+     *
+     * @throws net.dv8tion.jda.core.exceptions.InsufficientPermissionException
+     *         If one of the provided messages is from another user and cannot be deleted due to permissions
+     * @throws IllegalArgumentException
+     *         If one of the provided messages is from another user and cannot be deleted because this is not in a guild
+     *
+     * @return List of futures representing all deletion tasks
+     *
+     * @see    RequestFuture#allOf(Collection)
+     */
+    default List<RequestFuture<Void>> purgeMessages(Message... messages)
+    {
+        if (messages == null || messages.length == 0)
+            return Collections.emptyList();
+        return purgeMessages(Arrays.asList(messages));
+    }
+
+    /**
+     * Convenience method to delete messages in the most efficient way available.
+     * <br>This combines both {@link TextChannel#deleteMessagesByIds(Collection)} as well as {@link Message#delete()}
+     * to delete all messages provided. No checks will be done to prevent failures, use {@link java.util.concurrent.CompletionStage#exceptionally(Function)}
+     * to handle failures.
+     *
+     * <p>For possible ErrorResponses see {@link #purgeMessagesById(long...)}.
+     *
+     * @param  messages
+     *         The messages to delete
+     *
+     * @throws net.dv8tion.jda.core.exceptions.InsufficientPermissionException
+     *         If one of the provided messages is from another user and cannot be deleted due to permissions
+     * @throws IllegalArgumentException
+     *         If one of the provided messages is from another user and cannot be deleted because this is not in a guild
+     *
+     * @return List of futures representing all deletion tasks
+     *
+     * @see    RequestFuture#allOf(Collection)
+     */
+    default List<RequestFuture<Void>> purgeMessages(List<? extends Message> messages)
+    {
+        if (messages == null || messages.isEmpty())
+            return Collections.emptyList();
+        long[] ids = new long[messages.size()];
+        for (int i = 0; i < ids.length; i++)
+            ids[i] = messages.get(i).getIdLong();
+        return purgeMessagesById(ids);
+    }
+
+    /**
+     * Convenience method to delete messages in the most efficient way available.
+     * <br>This combines both {@link TextChannel#deleteMessagesByIds(Collection)} as well as {@link #deleteMessageById(long)}
+     * to delete all messages provided. No checks will be done to prevent failures, use {@link java.util.concurrent.CompletionStage#exceptionally(Function)}
+     * to handle failures.
+     *
+     * <p>Possible ErrorResponses include:
+     * <ul>
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#UNKNOWN_CHANNEL UNKNOWN_CHANNEL}
+     *     <br>if this channel was deleted</li>
+     *
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#UNKNOWN_MESSAGE UNKNOWN_MESSAGE}
+     *     <br>if any of the provided messages does not exist</li>
+     *
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#MISSING_ACCESS MISSING_ACCESS}
+     *     <br>if we were removed from the channel</li>
+     *
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#MISSING_PERMISSIONS MISSING_PERMISSIONS}
+     *     <br>The send request was attempted after the account lost
+     *         {@link net.dv8tion.jda.core.Permission#MESSAGE_MANAGE Permission.MESSAGE_MANAGE} in the channel.</li>
+     * </ul>
+     *
+     * @param  messageIds
+     *         The message ids to delete
+     *
+     * @return List of futures representing all deletion tasks
+     *
+     * @see    RequestFuture#allOf(Collection)
+     */
+    default List<RequestFuture<Void>> purgeMessagesById(long... messageIds)
+    {
+        if (messageIds == null || messageIds.length == 0)
+            return Collections.emptyList();
+        List<RequestFuture<Void>> list = new ArrayList<>(messageIds.length);
+        TreeSet<Long> sortedIds = new TreeSet<>(Comparator.reverseOrder());
+        for (long messageId : messageIds)
+            sortedIds.add(messageId);
+        for (long messageId : sortedIds)
+            list.add(deleteMessageById(messageId).submit());
+        return list;
     }
 
     /**
@@ -700,7 +843,7 @@ public interface MessageChannel extends ISnowflake, Formattable
         Checks.check(file.exists() && file.canRead(),
             "Provided file is either null, doesn't exist or is not readable!");
         Checks.check(file.length() <= getJDA().getSelfUser().getAllowedFileSize(),
-            "File is to big! Max file-size is 8 MiB for normal and 50 MiB for nitro users");
+            "File is too big! Max file-size is 8 MiB for normal and 50 MiB for nitro users");
         Checks.notNull(fileName, "fileName");
 
         try
@@ -832,7 +975,7 @@ public interface MessageChannel extends ISnowflake, Formattable
         Checks.notNull(data, "data");
         Checks.notNull(fileName, "fileName");
         final long maxSize = getJDA().getSelfUser().getAllowedFileSize();
-        Checks.check(data.length <= maxSize, "File is to big! Max file-size is %d bytes", maxSize);
+        Checks.check(data.length <= maxSize, "File is too big! Max file-size is %d bytes", maxSize);
         return sendFile(new ByteArrayInputStream(data), fileName, message);
     }
 
@@ -883,7 +1026,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     default RestAction<Message> getMessageById(String messageId)
     {
         AccountTypeException.check(getJDA().getAccountType(), AccountType.BOT);
-        Checks.notEmpty(messageId, "Provided messageId");
+        Checks.isSnowflake(messageId, "Message ID");
 
         Route.CompiledRoute route = Route.Messages.GET_MESSAGE.compile(getId(), messageId);
         return new RestAction<Message>(getJDA(), route)
@@ -893,7 +1036,7 @@ public interface MessageChannel extends ISnowflake, Formattable
             {
                 if (response.isOk())
                 {
-                    Message m = api.getEntityBuilder().createMessage(response.getObject(), MessageChannel.this, false);
+                    Message m = api.get().getEntityBuilder().createMessage(response.getObject(), MessageChannel.this, false);
                     request.onSuccess(m);
                 }
                 else
@@ -991,7 +1134,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default AuditableRestAction<Void> deleteMessageById(String messageId)
     {
-        Checks.notEmpty(messageId, "messageId");
+        Checks.isSnowflake(messageId, "Message ID");
 
         Route.CompiledRoute route = Route.Messages.DELETE_MESSAGE.compile(getId(), messageId);
         return new AuditableRestAction<Void>(getJDA(), route) {
@@ -1765,7 +1908,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default RestAction<Void> addReactionById(String messageId, String unicode)
     {
-        Checks.notEmpty(messageId, "MessageId");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notEmpty(unicode, "Provided Unicode");
         Checks.noWhitespace(unicode, "Provided Unicode");
 
@@ -1910,7 +2053,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default RestAction<Void> addReactionById(String messageId, Emote emote)
     {
-        Checks.notEmpty(messageId, "MessageId");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notNull(emote, "Emote");
 
         Route.CompiledRoute route = Route.Messages.ADD_REACTION.compile(getId(), messageId, String.format("%s:%s", emote.getName(), emote.getId()));
@@ -2046,7 +2189,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default RestAction<Void> removeReactionById(String messageId, String unicode)
     {
-        Checks.noWhitespace(messageId, "Message ID");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.noWhitespace(unicode, "Emoji");
 
         final String code = MiscUtil.encodeUTF8(unicode);
@@ -2275,7 +2418,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default RestAction<Void> pinMessageById(String messageId)
     {
-        Checks.notEmpty(messageId, "messageId");
+        Checks.isSnowflake(messageId, "Message ID");
 
         Route.CompiledRoute route = Route.Messages.ADD_PINNED_MESSAGE.compile(getId(), messageId);
         return new RestAction<Void>(getJDA(), route)
@@ -2376,7 +2519,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default RestAction<Void> unpinMessageById(String messageId)
     {
-        Checks.notEmpty(messageId, "messageId");
+        Checks.isSnowflake(messageId, "Message ID");
 
         Route.CompiledRoute route = Route.Messages.REMOVE_PINNED_MESSAGE.compile(getId(), messageId);
         return new RestAction<Void>(getJDA(), route)
@@ -2471,7 +2614,7 @@ public interface MessageChannel extends ISnowflake, Formattable
                 if (response.isOk())
                 {
                     LinkedList<Message> pinnedMessages = new LinkedList<>();
-                    EntityBuilder builder = api.getEntityBuilder();
+                    EntityBuilder builder = api.get().getEntityBuilder();
                     JSONArray pins = response.getArray();
 
                     for (int i = 0; i < pins.length(); i++)
@@ -2534,7 +2677,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default MessageAction editMessageById(String messageId, CharSequence newContent)
     {
-        Checks.noWhitespace(messageId, "MessageId");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notEmpty(newContent, "Provided message content");
         Checks.check(newContent.length() <= 2000, "Provided newContent length must be 2000 or less characters.");
 
@@ -2639,7 +2782,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default MessageAction editMessageById(String messageId, Message newContent)
     {
-        Checks.noWhitespace(messageId, "messageId");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notNull(newContent, "message");
 
         Route.CompiledRoute route = Route.Messages.EDIT_MESSAGE.compile(getId(), messageId);
@@ -2860,7 +3003,7 @@ public interface MessageChannel extends ISnowflake, Formattable
     @CheckReturnValue
     default MessageAction editMessageById(String messageId, MessageEmbed newEmbed)
     {
-        Checks.noWhitespace(messageId, "Message ID");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notNull(newEmbed, "MessageEmbed");
 
         Route.CompiledRoute route = Route.Messages.EDIT_MESSAGE.compile(getId(), messageId);

@@ -19,6 +19,7 @@ package net.dv8tion.jda.core.requests.restaction;
 import net.dv8tion.jda.core.Permission;
 import net.dv8tion.jda.core.entities.Guild;
 import net.dv8tion.jda.core.entities.Role;
+import net.dv8tion.jda.core.entities.impl.GuildImpl;
 import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Response;
@@ -38,7 +39,6 @@ import java.util.function.BooleanSupplier;
  * This extension allows setting properties before executing the action.
  *
  * @since  3.0
- * @author Florian Spieß
  */
 public class RoleAction extends AuditableRestAction<Role>
 {
@@ -162,6 +162,8 @@ public class RoleAction extends AuditableRestAction<Role>
      *         If any of the provided permissions is {@code null}
      *
      * @return The current RoleAction, for chaining convenience
+     *
+     * @see    net.dv8tion.jda.core.Permission#getRaw(net.dv8tion.jda.core.Permission...) Permission.getRaw(Permission...)
      */
     @CheckReturnValue
     public RoleAction setPermissions(Permission... permissions)
@@ -193,6 +195,9 @@ public class RoleAction extends AuditableRestAction<Role>
      *         If any of the provided permissions is {@code null}
      *
      * @return The current RoleAction, for chaining convenience
+     *
+     * @see    net.dv8tion.jda.core.Permission#getRaw(java.util.Collection) Permission.getRaw(Collection)
+     * @see    java.util.EnumSet EnumSet
      */
     @CheckReturnValue
     public RoleAction setPermissions(Collection<Permission> permissions)
@@ -237,7 +242,7 @@ public class RoleAction extends AuditableRestAction<Role>
         {
             Checks.notNegative(permissions, "Raw Permissions");
             Checks.check(permissions <= Permission.ALL_PERMISSIONS, "Provided permissions may not be greater than a full permission set!");
-            for (Permission p : Permission.getPermissions(permissions))
+            for (Permission p : Permission.toEnumSet(permissions))
                 checkPermission(p);
         }
         this.permissions = permissions;
@@ -266,7 +271,7 @@ public class RoleAction extends AuditableRestAction<Role>
     protected void handleResponse(Response response, Request<Role> request)
     {
         if (response.isOk())
-            request.onSuccess(api.getEntityBuilder().createRole(response.getObject(), guild.getIdLong()));
+            request.onSuccess(api.get().getEntityBuilder().createRole((GuildImpl) guild, response.getObject(), guild.getIdLong()));
         else
             request.onFailure(response);
     }

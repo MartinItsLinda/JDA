@@ -17,11 +17,11 @@
 package net.dv8tion.jda.core.handle;
 
 import net.dv8tion.jda.core.audio.AudioConnection;
-import net.dv8tion.jda.core.audio.AudioWebSocket;
 import net.dv8tion.jda.core.entities.Guild;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.managers.impl.AudioManagerImpl;
 import net.dv8tion.jda.core.requests.WebSocketClient;
+import net.dv8tion.jda.core.utils.MiscUtil;
 import org.json.JSONObject;
 
 public class VoiceServerUpdateHandler extends SocketHandler
@@ -35,14 +35,13 @@ public class VoiceServerUpdateHandler extends SocketHandler
     protected Long handleInternally(JSONObject content)
     {
         final long guildId = content.getLong("guild_id");
-        Guild guild = api.getGuildMap().get(guildId);
-        if (guild == null)
-            throw new IllegalArgumentException("Attempted to start audio connection with Guild that doesn't exist! JSON: " + content);
-
-        api.getClient().updateAudioConnection(guildId, guild.getSelfMember().getVoiceState().getChannel());
-
-        if (api.getGuildLock().isLocked(guildId))
+        if (getJDA().getGuildSetupController().isLocked(guildId))
             return guildId;
+        Guild guild = getJDA().getGuildMap().get(guildId);
+        if (guild == null)
+            throw new IllegalArgumentException("Attempted to start audio connection with Guild that doesn't exist!");
+
+        getJDA().getClient().updateAudioConnection(guildId, guild.getSelfMember().getVoiceState().getChannel());
 
         if (content.isNull("endpoint"))
         {
@@ -52,33 +51,32 @@ public class VoiceServerUpdateHandler extends SocketHandler
             return null;
         }
 
-        String endpoint = content.getString("endpoint");
+        //Strip the port from the endpoint.
+        String endpoint = content.getString("endpoint").replace(":80", "");
         String token = content.getString("token");
         String sessionId = guild.getSelfMember().getVoiceState().getSessionId();
         if (sessionId == null)
             throw new IllegalArgumentException("Attempted to create audio connection without having a session ID. Did VOICE_STATE_UPDATED fail?");
 
-        //Strip the port from the endpoint.
-        endpoint = endpoint.replace(":80", "");
-
         AudioManagerImpl audioManager = (AudioManagerImpl) guild.getAudioManager();
-        synchronized (audioManager.CONNECTION_LOCK) //Synchronized to prevent attempts to close while setting up initial objects.
+        MiscUtil.locked(audioManager.CONNECTION_LOCK, () ->
         {
+            //Synchronized to prevent attempts to close while setting up initial objects.
             if (audioManager.isConnected())
                 audioManager.prepareForRegionChange();
             if (!audioManager.isAttemptingToConnect())
             {
-                WebSocketClient.LOG.debug("Received a VOICE_SERVER_UPDATE but JDA is not currently connected nor attempted to connect " +
-                        "to a VoiceChannel. Assuming that this is caused by another client running on this account. Ignoring the event.");
-                return null;
+                WebSocketClient.LOG.debug(
+                    "Received a VOICE_SERVER_UPDATE but JDA is not currently connected nor attempted to connect " +
+                    "to a VoiceChannel. Assuming that this is caused by another client running on this account. " +
+                    "Ignoring the event.");
+                return;
             }
 
-            AudioWebSocket socket = new AudioWebSocket(audioManager.getListenerProxy(), endpoint, api, guild, sessionId, token, audioManager.isAutoReconnect());
-            AudioConnection connection = new AudioConnection(socket, audioManager.getQueuedAudioConnection());
+            AudioConnection connection = new AudioConnection(audioManager, endpoint, sessionId, token);
             audioManager.setAudioConnection(connection);
-            socket.startConnection();
-
-            return null;
-        }
+            connection.startConnection();
+        });
+        return null;
     }
 }

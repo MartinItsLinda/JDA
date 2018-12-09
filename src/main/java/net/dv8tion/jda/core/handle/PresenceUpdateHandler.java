@@ -25,10 +25,8 @@ import net.dv8tion.jda.core.entities.impl.GuildImpl;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.entities.impl.MemberImpl;
 import net.dv8tion.jda.core.entities.impl.UserImpl;
-import net.dv8tion.jda.core.events.user.UserAvatarUpdateEvent;
-import net.dv8tion.jda.core.events.user.UserGameUpdateEvent;
-import net.dv8tion.jda.core.events.user.UserNameUpdateEvent;
-import net.dv8tion.jda.core.events.user.UserOnlineStatusUpdateEvent;
+import net.dv8tion.jda.core.events.user.update.*;
+import net.dv8tion.jda.core.utils.cache.CacheFlag;
 import org.json.JSONObject;
 
 import java.util.Objects;
@@ -49,12 +47,12 @@ public class PresenceUpdateHandler extends SocketHandler
         if (!content.isNull("guild_id"))
         {
             final long guildId = content.getLong("guild_id");
-            if (api.getGuildLock().isLocked(guildId))
+            if (getJDA().getGuildSetupController().isLocked(guildId))
                 return guildId;
-            guild = (GuildImpl) api.getGuildById(guildId);
+            guild = (GuildImpl) getJDA().getGuildById(guildId);
             if (guild == null)
             {
-                api.getEventCache().cache(EventCache.Type.GUILD, guildId, () -> handle(responseNumber, allContent));
+                getJDA().getEventCache().cache(EventCache.Type.GUILD, guildId, responseNumber, allContent, this::handle);
                 EventCache.LOG.debug("Received a PRESENCE_UPDATE for a guild that is not yet cached! " +
                     "GuildId: " + guildId + " UserId: " + content.getJSONObject("user").get("id"));
                 return null;
@@ -63,7 +61,7 @@ public class PresenceUpdateHandler extends SocketHandler
 
         JSONObject jsonUser = content.getJSONObject("user");
         final long userId = jsonUser.getLong("id");
-        UserImpl user = (UserImpl) api.getUserMap().get(userId);
+        UserImpl user = (UserImpl) getJDA().getUserMap().get(userId);
 
         //If we do know about the user, lets update the user's specific info.
         // Afterwards, we will see if we already have them cached in the specific guild
@@ -77,33 +75,40 @@ public class PresenceUpdateHandler extends SocketHandler
                 String name = jsonUser.getString("username");
                 String discriminator = jsonUser.get("discriminator").toString();
                 String avatarId = jsonUser.optString("avatar", null);
+                String oldAvatar = user.getAvatarId();
 
-                if (!user.getName().equals(name) || !user.getDiscriminator().equals(discriminator))
+                if (!user.getName().equals(name))
                 {
                     String oldUsername = user.getName();
-                    String oldDiscriminator = user.getDiscriminator();
                     user.setName(name);
-                    user.setDiscriminator(discriminator);
-                    api.getEventManager().handle(
-                        new UserNameUpdateEvent(
-                            api, responseNumber,
-                            user, oldUsername, oldDiscriminator));
+                    getJDA().getEventManager().handle(
+                        new UserUpdateNameEvent(
+                            getJDA(), responseNumber,
+                            user, oldUsername));
                 }
-                String oldAvatar = user.getAvatarId();
+                if (!user.getDiscriminator().equals(discriminator))
+                {
+                    String oldDiscriminator = user.getDiscriminator();
+                    user.setDiscriminator(discriminator);
+                    getJDA().getEventManager().handle(
+                        new UserUpdateDiscriminatorEvent(
+                            getJDA(), responseNumber,
+                            user, oldDiscriminator));
+                }
                 if (!Objects.equals(avatarId, oldAvatar))
                 {
                     String oldAvatarId = user.getAvatarId();
                     user.setAvatarId(avatarId);
-                    api.getEventManager().handle(
-                        new UserAvatarUpdateEvent(
-                            api, responseNumber,
+                    getJDA().getEventManager().handle(
+                        new UserUpdateAvatarEvent(
+                            getJDA(), responseNumber,
                             user, oldAvatarId));
                 }
             }
 
             //Now that we've update the User's info, lets see if we need to set the specific Presence information.
             // This is stored in the Member or Relation objects.
-            final JSONObject game = content.isNull("game") ? null : content.optJSONObject("game");
+            final JSONObject game = !getJDA().isCacheFlagSet(CacheFlag.GAME) || content.isNull("game") ? null : content.optJSONObject("game");
             Game nextGame = null;
             boolean parsedGame = false;
             try
@@ -148,18 +153,18 @@ public class PresenceUpdateHandler extends SocketHandler
                     {
                         OnlineStatus oldStatus = member.getOnlineStatus();
                         member.setOnlineStatus(status);
-                        api.getEventManager().handle(
-                            new UserOnlineStatusUpdateEvent(
-                                api, responseNumber,
+                        getJDA().getEventManager().handle(
+                            new UserUpdateOnlineStatusEvent(
+                                getJDA(), responseNumber,
                                 user, guild, oldStatus));
                     }
                     if (parsedGame && !Objects.equals(member.getGame(), nextGame))
                     {
                         Game oldGame = member.getGame();
                         member.setGame(nextGame);
-                        api.getEventManager().handle(
-                            new UserGameUpdateEvent(
-                                api, responseNumber,
+                        getJDA().getEventManager().handle(
+                            new UserUpdateGameEvent(
+                                getJDA(), responseNumber,
                                 user, guild, oldGame));
                     }
                 }
@@ -167,9 +172,9 @@ public class PresenceUpdateHandler extends SocketHandler
             else
             {
                 //In this case, this PRESENCE_UPDATE is for a Relation.
-                if (api.getAccountType() != AccountType.CLIENT)
+                if (getJDA().getAccountType() != AccountType.CLIENT)
                     return null;
-                JDAClient client = api.asClient();
+                JDAClient client = getJDA().asClient();
                 FriendImpl friend = (FriendImpl) client.getFriendById(userId);
 
                 if (friend != null)
@@ -178,18 +183,18 @@ public class PresenceUpdateHandler extends SocketHandler
                     {
                         OnlineStatus oldStatus = friend.getOnlineStatus();
                         friend.setOnlineStatus(status);
-                        api.getEventManager().handle(
-                            new UserOnlineStatusUpdateEvent(
-                                api, responseNumber,
+                        getJDA().getEventManager().handle(
+                            new UserUpdateOnlineStatusEvent(
+                                getJDA(), responseNumber,
                                 user, null, oldStatus));
                     }
                     if (parsedGame && !Objects.equals(friend.getGame(), nextGame))
                     {
                         Game oldGame = friend.getGame();
                         friend.setGame(nextGame);
-                        api.getEventManager().handle(
-                            new UserGameUpdateEvent(
-                                api, responseNumber,
+                        getJDA().getEventManager().handle(
+                            new UserUpdateGameEvent(
+                                getJDA(), responseNumber,
                                 user, null, oldGame));
                     }
                 }

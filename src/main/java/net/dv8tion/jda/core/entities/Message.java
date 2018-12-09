@@ -130,7 +130,7 @@ public interface Message extends ISnowflake, Formattable
      *
      * @see #getInvites() getInvites()
      */
-    Pattern INVITE_PATTERN = Pattern.compile("(?:https?://)?discord(?:app\\.com/invite|\\.gg)/(\\S+)", Pattern.CASE_INSENSITIVE);
+    Pattern INVITE_PATTERN = Pattern.compile("(?:https?://)?discord(?:app\\.com/invite|\\.gg)/([a-z0-9-]+)", Pattern.CASE_INSENSITIVE);
 
     /**
      * An immutable list of all mentioned {@link net.dv8tion.jda.core.entities.User Users}.
@@ -301,6 +301,17 @@ public interface Message extends ISnowflake, Formattable
      * @return Message author, or {@code null} if the message was not sent from a TextChannel.
      */
     Member getMember();
+
+    /**
+     * Returns the jump-to URL for the received message. Clicking this URL in the Discord client will cause the client to
+     * jump to the specified message.
+     * 
+     * @throws java.lang.UnsupportedOperationException
+     *         If this is not a Received Message from {@link net.dv8tion.jda.core.entities.MessageType#DEFAULT MessageType.DEFAULT}
+     * 
+     * @return A String representing the jump-to URL for the message
+     */
+    String getJumpUrl();
 
     /**
      * The textual content of this message in the format that would be shown to the Discord client. All
@@ -709,6 +720,9 @@ public interface Message extends ISnowflake, Formattable
      * a {@link net.dv8tion.jda.core.entities.TextChannel TextChannel} and the current account has
      * {@link net.dv8tion.jda.core.Permission#MESSAGE_MANAGE Permission.MESSAGE_MANAGE} in the channel.
      *
+     * <p><u>To delete many messages at once in a {@link net.dv8tion.jda.core.entities.MessageChannel MessageChannel}
+     * you should use {@link net.dv8tion.jda.core.entities.MessageChannel#purgeMessages(List) MessageChannel.purgeMessages(Collection)} instead.</u>
+     *
      * <p>The following {@link net.dv8tion.jda.core.requests.ErrorResponse ErrorResponses} are possible:
      * <ul>
      *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#MISSING_ACCESS MISSING_ACCESS}
@@ -738,6 +752,9 @@ public interface Message extends ISnowflake, Formattable
      *         {@link net.dv8tion.jda.core.entities.TextChannel TextChannel}.
      *
      * @return {@link net.dv8tion.jda.core.requests.restaction.AuditableRestAction AuditableRestAction}
+     *
+     * @see    net.dv8tion.jda.core.entities.TextChannel#deleteMessages(java.util.Collection) TextChannel.deleteMessages(Collection)
+     * @see    net.dv8tion.jda.core.entities.MessageChannel#purgeMessages(java.util.List) MessageChannel.purgeMessages(List)
      */
     @CheckReturnValue
     AuditableRestAction<Void> delete();
@@ -1217,7 +1234,7 @@ public interface Message extends ISnowflake, Formattable
 
         /**
          * The size of the attachment in bytes.
-         * <br>Example: if {@link #getSize() getSize()} returns 1024, then the attachment is 1024 bytes, or 1KB, in size.
+         * <br>Example: if {@code getSize()} returns 1024, then the attachment is 1024 bytes, or 1KiB, in size.
          *
          * @return Positive int containing the size of the Attachment.
          */
@@ -1228,9 +1245,9 @@ public interface Message extends ISnowflake, Formattable
 
         /**
          * The height of the Attachment if this Attachment is an image.
-         * <br>If this Attachment is not an image, this returns 0.
+         * <br>If this Attachment is not an image, this returns -1.
          *
-         * @return Never-negative int containing image Attachment height.
+         * @return int containing image Attachment height.
          */
         public int getHeight()
         {
@@ -1239,9 +1256,9 @@ public interface Message extends ISnowflake, Formattable
 
         /**
          * The width of the Attachment if this Attachment is an image.
-         * <br>If this Attachment is not an image, this returns 0.
+         * <br>If this Attachment is not an image, this returns -1.
          *
-         * @return Never-negative int containing image Attachment width.
+         * @return int containing image Attachment width.
          */
         public int getWidth()
         {

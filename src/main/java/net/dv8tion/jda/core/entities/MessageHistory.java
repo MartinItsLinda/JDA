@@ -180,7 +180,7 @@ public class MessageHistory
                     return;
                 }
 
-                EntityBuilder builder = api.getEntityBuilder();;
+                EntityBuilder builder = api.get().getEntityBuilder();
                 LinkedList<Message> msgs  = new LinkedList<>();
                 JSONArray historyJson = response.getArray();
 
@@ -258,7 +258,7 @@ public class MessageHistory
                     return;
                 }
 
-                EntityBuilder builder = api.getEntityBuilder();;
+                EntityBuilder builder = api.get().getEntityBuilder();
                 LinkedList<Message> msgs  = new LinkedList<>();
                 JSONArray historyJson = response.getArray();
 
@@ -465,7 +465,7 @@ public class MessageHistory
 
     private static void checkArguments(MessageChannel channel, String messageId)
     {
-        Checks.noWhitespace(messageId, "Message ID");
+        Checks.isSnowflake(messageId, "Message ID");
         Checks.notNull(channel, "Channel");
         if (channel.getType() == ChannelType.TEXT)
         {
@@ -529,7 +529,7 @@ public class MessageHistory
             }
             final MessageHistory result = new MessageHistory(channel);
             final JSONArray array = response.getArray();
-            final EntityBuilder builder = api.getEntityBuilder();
+            final EntityBuilder builder = api.get().getEntityBuilder();
             for (int i = 0; i < array.length(); i++)
             {
                 try

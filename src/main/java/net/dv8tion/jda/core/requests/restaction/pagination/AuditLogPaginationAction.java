@@ -29,6 +29,8 @@ import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.Route;
+import net.dv8tion.jda.core.utils.Checks;
+import net.dv8tion.jda.core.utils.Helpers;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -73,7 +75,6 @@ import java.util.List;
  * </code></pre>
  *
  * @since  3.2
- * @author Florian Spieß
  */
 public class AuditLogPaginationAction extends PaginationAction<AuditLogEntry, AuditLogPaginationAction>
 {
@@ -128,10 +129,14 @@ public class AuditLogPaginationAction extends PaginationAction<AuditLogEntry, Au
      *         {@link net.dv8tion.jda.core.entities.User User} id used to filter,
      *         or {@code null} to remove user filtering
      *
+     * @throws IllegalArgumentException
+     *         If the provided userId is not valid
+     *
      * @return The current AuditLogPaginationAction for chaining convenience
      */
     public AuditLogPaginationAction user(String userId)
     {
+        Checks.isSnowflake(userId, "User ID");
         this.userId = userId;
         return this;
     }
@@ -175,7 +180,7 @@ public class AuditLogPaginationAction extends PaginationAction<AuditLogEntry, Au
             route = route.withQueryParams("action_type", String.valueOf(type.getKey()));
 
         if (userId != null)
-            route = route.withQueryParams("action_type", userId);
+            route = route.withQueryParams("user_id", userId);
 
         if (last != null)
             route = route.withQueryParams("before", last.getId());
@@ -194,10 +199,11 @@ public class AuditLogPaginationAction extends PaginationAction<AuditLogEntry, Au
 
         JSONObject obj = response.getObject();
         JSONArray users = obj.getJSONArray("users");
+        JSONArray webhooks = obj.getJSONArray("webhooks");
         JSONArray entries = obj.getJSONArray("audit_log_entries");
 
         List<AuditLogEntry> list = new ArrayList<>(entries.length());
-        EntityBuilder builder = api.getEntityBuilder();
+        EntityBuilder builder = api.get().getEntityBuilder();
 
         TLongObjectMap<JSONObject> userMap = new TLongObjectHashMap<>();
         for (int i = 0; i < users.length(); i++)
@@ -205,13 +211,22 @@ public class AuditLogPaginationAction extends PaginationAction<AuditLogEntry, Au
             JSONObject user = users.getJSONObject(i);
             userMap.put(user.getLong("id"), user);
         }
+        
+        TLongObjectMap<JSONObject> webhookMap = new TLongObjectHashMap<>();
+        for (int i = 0; i < webhooks.length(); i++)
+        {
+            JSONObject webhook = webhooks.getJSONObject(i);
+            webhookMap.put(webhook.getLong("id"), webhook);
+        }
+        
         for (int i = 0; i < entries.length(); i++)
         {
             try
             {
                 JSONObject entry = entries.getJSONObject(i);
-                JSONObject user = userMap.get(entry.getLong("user_id"));
-                AuditLogEntry result = builder.createAuditLogEntry((GuildImpl) guild, entry, user);
+                JSONObject user = userMap.get(Helpers.optLong(entry, "user_id", 0));
+                JSONObject webhook = webhookMap.get(Helpers.optLong(entry, "target_id", 0));
+                AuditLogEntry result = builder.createAuditLogEntry((GuildImpl) guild, entry, user, webhook);
                 list.add(result);
                 if (this.useCache)
                     this.cached.add(result);

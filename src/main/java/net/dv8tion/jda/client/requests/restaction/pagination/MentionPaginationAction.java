@@ -52,7 +52,6 @@ import java.util.List;
  * </code></pre>
  *
  * @since  3.0
- * @author Florian Spieß
  */
 public class MentionPaginationAction extends PaginationAction<Message, MentionPaginationAction>
 {
@@ -176,7 +175,7 @@ public class MentionPaginationAction extends PaginationAction<Message, MentionPa
             return;
         }
 
-        EntityBuilder builder = api.getEntityBuilder();;
+        EntityBuilder builder = api.get().getEntityBuilder();
         List<Message> mentions = new LinkedList<>();
         JSONArray arr = response.getArray();
         for (int i = 0; i < arr.length(); i++)

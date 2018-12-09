@@ -20,25 +20,27 @@ import gnu.trove.map.TLongObjectMap;
 import net.dv8tion.jda.client.requests.restaction.pagination.MentionPaginationAction;
 import net.dv8tion.jda.core.AccountType;
 import net.dv8tion.jda.core.Permission;
+import net.dv8tion.jda.core.Region;
 import net.dv8tion.jda.core.entities.*;
 import net.dv8tion.jda.core.exceptions.AccountTypeException;
-import net.dv8tion.jda.core.exceptions.GuildUnavailableException;
 import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.exceptions.PermissionException;
 import net.dv8tion.jda.core.managers.AudioManager;
 import net.dv8tion.jda.core.managers.GuildController;
 import net.dv8tion.jda.core.managers.GuildManager;
-import net.dv8tion.jda.core.managers.GuildManagerUpdatable;
 import net.dv8tion.jda.core.managers.impl.AudioManagerImpl;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.RestAction;
 import net.dv8tion.jda.core.requests.Route;
+import net.dv8tion.jda.core.requests.restaction.MemberAction;
 import net.dv8tion.jda.core.requests.restaction.pagination.AuditLogPaginationAction;
 import net.dv8tion.jda.core.utils.Checks;
+import net.dv8tion.jda.core.utils.Helpers;
 import net.dv8tion.jda.core.utils.MiscUtil;
 import net.dv8tion.jda.core.utils.cache.MemberCacheView;
 import net.dv8tion.jda.core.utils.cache.SnowflakeCacheView;
+import net.dv8tion.jda.core.utils.cache.UpstreamReference;
 import net.dv8tion.jda.core.utils.cache.impl.MemberCacheViewImpl;
 import net.dv8tion.jda.core.utils.cache.impl.SnowflakeCacheViewImpl;
 import net.dv8tion.jda.core.utils.cache.impl.SortedSnowflakeCacheView;
@@ -51,25 +53,25 @@ import javax.annotation.Nullable;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class GuildImpl implements Guild
 {
     private final long id;
-    private final JDAImpl api;
+    private final UpstreamReference<JDAImpl> api;
 
-    private final SortedSnowflakeCacheView<Category> categoryCache = new SortedSnowflakeCacheView<Category>(Channel::getName, Comparator.naturalOrder());
-    private final SortedSnowflakeCacheView<VoiceChannel> voiceChannelCache = new SortedSnowflakeCacheView<VoiceChannel>(Channel::getName, Comparator.naturalOrder());
-    private final SortedSnowflakeCacheView<TextChannel> textChannelCache = new SortedSnowflakeCacheView<TextChannel>(Channel::getName, Comparator.naturalOrder());
-    private final SortedSnowflakeCacheView<Role> roleCache = new SortedSnowflakeCacheView<Role>(Role::getName, Comparator.reverseOrder());
-    private final SnowflakeCacheViewImpl<Emote> emoteCache = new SnowflakeCacheViewImpl<>(Emote::getName);
+    private final SortedSnowflakeCacheView<Category> categoryCache = new SortedSnowflakeCacheView<>(Category.class, Channel::getName, Comparator.naturalOrder());
+    private final SortedSnowflakeCacheView<VoiceChannel> voiceChannelCache = new SortedSnowflakeCacheView<>(VoiceChannel.class, Channel::getName, Comparator.naturalOrder());
+    private final SortedSnowflakeCacheView<TextChannel> textChannelCache = new SortedSnowflakeCacheView<>(TextChannel.class, Channel::getName, Comparator.naturalOrder());
+    private final SortedSnowflakeCacheView<Role> roleCache = new SortedSnowflakeCacheView<>(Role.class, Role::getName, Comparator.reverseOrder());
+    private final SnowflakeCacheViewImpl<Emote> emoteCache = new SnowflakeCacheViewImpl<>(Emote.class, Emote::getName);
     private final MemberCacheViewImpl memberCache = new MemberCacheViewImpl();
 
     private final TLongObjectMap<JSONObject> cachedPresences = MiscUtil.newLongMap();
 
-    private final Object mngLock = new Object();
+    private final ReentrantLock mngLock = new ReentrantLock();
     private volatile GuildManager manager;
-    private volatile GuildManagerUpdatable managerUpdatable;
     private volatile GuildController controller;
 
     private Member owner;
@@ -77,6 +79,7 @@ public class GuildImpl implements Guild
     private String iconId;
     private String splashId;
     private String region;
+    private long ownerId;
     private Set<String> features;
     private VoiceChannel afkChannel;
     private TextChannel systemChannel;
@@ -92,7 +95,49 @@ public class GuildImpl implements Guild
     public GuildImpl(JDAImpl api, long id)
     {
         this.id = id;
-        this.api = api;
+        this.api = new UpstreamReference<>(api);
+    }
+
+    @Override
+    public RestAction<EnumSet<Region>> retrieveRegions(boolean includeDeprecated)
+    {
+        Route.CompiledRoute route = Route.Guilds.GET_VOICE_REGIONS.compile(getId());
+        return new RestAction<EnumSet<Region>>(getJDA(), route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<EnumSet<Region>> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+                EnumSet<Region> set = EnumSet.noneOf(Region.class);
+                JSONArray arr = response.getArray();
+                for (int i = 0; arr != null && i < arr.length(); i++)
+                {
+                    JSONObject obj = arr.getJSONObject(i);
+                    if (!includeDeprecated && Helpers.optBoolean(obj, "deprecated"))
+                        continue;
+                    String id = obj.optString("id");
+                    Region region = Region.fromKey(id);
+                    if (region != Region.UNKNOWN)
+                        set.add(region);
+                }
+                request.onSuccess(set);
+            }
+        };
+    }
+
+    @Override
+    public MemberAction addMember(String accessToken, String userId)
+    {
+        Checks.notBlank(accessToken, "Access-Token");
+        Checks.isSnowflake(userId, "User ID");
+        Checks.check(getMemberById(userId) == null, "User is already in this guild");
+        if (!getSelfMember().hasPermission(Permission.CREATE_INSTANT_INVITE))
+            throw new InsufficientPermissionException(Permission.CREATE_INSTANT_INVITE);
+        return new MemberAction(getJDA(), this, userId, accessToken);
     }
 
     @Override
@@ -110,7 +155,7 @@ public class GuildImpl implements Guild
     @Override
     public String getIconUrl()
     {
-        return iconId == null ? null : "https://cdn.discordapp.com/icons/" + id + "/" + iconId + ".jpg";
+        return iconId == null ? null : "https://cdn.discordapp.com/icons/" + id + "/" + iconId + ".png";
     }
 
     @Override
@@ -128,14 +173,12 @@ public class GuildImpl implements Guild
     @Override
     public String getSplashUrl()
     {
-        return splashId == null ? null : "https://cdn.discordapp.com/splashes/" + id + "/" + splashId + ".jpg";
+        return splashId == null ? null : "https://cdn.discordapp.com/splashes/" + id + "/" + splashId + ".png";
     }
 
     @Override
     public RestAction<String> getVanityUrl()
     {
-        if (!isAvailable())
-            throw new GuildUnavailableException();
         if (!getSelfMember().hasPermission(Permission.MANAGE_SERVER))
             throw new InsufficientPermissionException(Permission.MANAGE_SERVER);
         if (!getFeatures().contains("VANITY_URL"))
@@ -143,7 +186,7 @@ public class GuildImpl implements Guild
 
         Route.CompiledRoute route = Route.Guilds.GET_VANITY_URL.compile(getId());
 
-        return new RestAction<String>(api, route)
+        return new RestAction<String>(getJDA(), route)
         {
             @Override
             protected void handleResponse(Response response, Request<String> request)
@@ -179,7 +222,7 @@ public class GuildImpl implements Guild
 
         Route.CompiledRoute route = Route.Guilds.GET_WEBHOOKS.compile(getId());
 
-        return new RestAction<List<Webhook>>(api, route)
+        return new RestAction<List<Webhook>>(getJDA(), route)
         {
             @Override
             protected void handleResponse(Response response, Request<List<Webhook>> request)
@@ -192,7 +235,7 @@ public class GuildImpl implements Guild
 
                 JSONArray array = response.getArray();
                 List<Webhook> webhooks = new ArrayList<>(array.length());
-                EntityBuilder builder = api.getEntityBuilder();
+                EntityBuilder builder = api.get().getEntityBuilder();
 
                 for (Object object : array)
                 {
@@ -215,6 +258,12 @@ public class GuildImpl implements Guild
     public Member getOwner()
     {
         return owner;
+    }
+
+    @Override
+    public long getOwnerIdLong()
+    {
+        return ownerId;
     }
 
     @Override
@@ -283,12 +332,69 @@ public class GuildImpl implements Guild
         return emoteCache;
     }
 
+    @Override
+    public RestAction<List<ListedEmote>> retrieveEmotes()
+    {
+        Route.CompiledRoute route = Route.Emotes.GET_EMOTES.compile(getId());
+        return new RestAction<List<ListedEmote>>(getJDA(), route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<List<ListedEmote>> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+
+                EntityBuilder builder = GuildImpl.this.getJDA().getEntityBuilder();
+                JSONArray emotes = response.getArray();
+                List<ListedEmote> list = new ArrayList<>(emotes.length());
+                for (int i = 0; i < emotes.length(); i++)
+                {
+                    JSONObject emote = emotes.getJSONObject(i);
+                    list.add(builder.createEmote(GuildImpl.this, emote, true));
+                }
+
+                request.onSuccess(Collections.unmodifiableList(list));
+            }
+        };
+    }
+
+    @Override
+    public RestAction<ListedEmote> retrieveEmoteById(String id)
+    {
+        Checks.isSnowflake(id, "Emote ID");
+        Emote emote = getEmoteById(id);
+        if (emote != null)
+        {
+            ListedEmote listedEmote = (ListedEmote) emote;
+            if (listedEmote.hasUser() || !getSelfMember().hasPermission(Permission.MANAGE_EMOTES))
+                return new RestAction.EmptyRestAction<>(getJDA(), listedEmote);
+        }
+        Route.CompiledRoute route = Route.Emotes.GET_EMOTE.compile(getId(), id);
+        return new RestAction<ListedEmote>(getJDA(), route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<ListedEmote> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+
+                EntityBuilder builder = GuildImpl.this.getJDA().getEntityBuilder();
+                EmoteImpl emote = builder.createEmote(GuildImpl.this, response.getObject(), true);
+                request.onSuccess(emote);
+            }
+        };
+    }
+
     @Nonnull
     @Override
     public RestAction<List<Ban>> getBanList()
     {
-        if (!isAvailable())
-            throw new GuildUnavailableException();
         if (!getSelfMember().hasPermission(Permission.BAN_MEMBERS))
             throw new InsufficientPermissionException(Permission.BAN_MEMBERS);
 
@@ -304,7 +410,7 @@ public class GuildImpl implements Guild
                     return;
                 }
 
-                EntityBuilder builder = api.getEntityBuilder();
+                EntityBuilder builder = api.get().getEntityBuilder();
                 List<Ban> bans = new LinkedList<>();
                 JSONArray bannedArr = response.getArray();
 
@@ -319,11 +425,39 @@ public class GuildImpl implements Guild
         };
     }
 
+    @Nonnull
+    @Override
+    public RestAction<Ban> getBanById(@Nonnull String userId)
+    {
+        if (!getSelfMember().hasPermission(Permission.BAN_MEMBERS))
+            throw new InsufficientPermissionException(Permission.BAN_MEMBERS);
+
+        Checks.isSnowflake(userId, "User ID");
+
+        Route.CompiledRoute route = Route.Guilds.GET_BAN.compile(getId(), userId);
+        return new RestAction<Ban>(getJDA(), route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<Ban> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+
+                EntityBuilder builder = api.get().getEntityBuilder();
+                JSONObject bannedObj = response.getObject();
+                JSONObject user = bannedObj.getJSONObject("user");
+                final Ban ban = new Ban(builder.createFakeUser(user, false), bannedObj.optString("reason", null));
+                request.onSuccess(ban);
+            }
+        };
+    }
+
     @Override
     public RestAction<Integer> getPrunableMemberCount(int days)
     {
-        if (!isAvailable())
-            throw new GuildUnavailableException();
         if (!getSelfMember().hasPermission(Permission.KICK_MEMBERS))
             throw new InsufficientPermissionException(Permission.KICK_MEMBERS);
 
@@ -367,28 +501,12 @@ public class GuildImpl implements Guild
         GuildManager mng = manager;
         if (mng == null)
         {
-            synchronized (mngLock)
+            mng = MiscUtil.locked(mngLock, () ->
             {
-                mng = manager;
-                if (mng == null)
-                    mng = manager = new GuildManager(this);
-            }
-        }
-        return mng;
-    }
-
-    @Override
-    public GuildManagerUpdatable getManagerUpdatable()
-    {
-        GuildManagerUpdatable mng = managerUpdatable;
-        if (mng == null)
-        {
-            synchronized (mngLock)
-            {
-                mng = managerUpdatable;
-                if (mng == null)
-                    mng = managerUpdatable = new GuildManagerUpdatable(this);
-            }
+                if (manager == null)
+                    manager = new GuildManager(this);
+                return manager;
+            });
         }
         return mng;
     }
@@ -399,12 +517,12 @@ public class GuildImpl implements Guild
         GuildController ctrl = controller;
         if (ctrl == null)
         {
-            synchronized (mngLock)
+            ctrl = MiscUtil.locked(mngLock, () ->
             {
-                ctrl = controller;
-                if (ctrl == null)
-                    ctrl = controller = new GuildController(this);
-            }
+                if (controller == null)
+                    controller = new GuildController(this);
+                return controller;
+            });
         }
         return ctrl;
     }
@@ -429,7 +547,7 @@ public class GuildImpl implements Guild
             throw new IllegalStateException("Cannot leave a guild that you are the owner of! Transfer guild ownership first!");
 
         Route.CompiledRoute route = Route.Self.LEAVE_GUILD.compile(getId());
-        return new RestAction<Void>(api, route)
+        return new RestAction<Void>(getJDA(), route)
         {
             @Override
             protected void handleResponse(Response response, Request<Void> request)
@@ -445,7 +563,7 @@ public class GuildImpl implements Guild
     @Override
     public RestAction<Void> delete()
     {
-        if (api.getSelfUser().isMfaEnabled())
+        if (!getJDA().getSelfUser().isBot() && getJDA().getSelfUser().isMfaEnabled())
             throw new IllegalStateException("Cannot delete a guild without providing MFA code. Use Guild#delete(String)");
 
         return delete(null);
@@ -458,14 +576,14 @@ public class GuildImpl implements Guild
             throw new PermissionException("Cannot delete a guild that you do not own!");
 
         JSONObject mfaBody = null;
-        if (api.getSelfUser().isMfaEnabled())
+        if (!getJDA().getSelfUser().isBot() && getJDA().getSelfUser().isMfaEnabled())
         {
             Checks.notEmpty(mfaCode, "Provided MultiFactor Auth code");
             mfaBody = new JSONObject().put("code", mfaCode);
         }
 
         Route.CompiledRoute route = Route.Guilds.DELETE_GUILD.compile(getId());
-        return new RestAction<Void>(api, route, mfaBody)
+        return new RestAction<Void>(getJDA(), route, mfaBody)
         {
             @Override
             protected void handleResponse(Response response, Request<Void> request)
@@ -481,20 +599,23 @@ public class GuildImpl implements Guild
     @Override
     public AudioManager getAudioManager()
     {
-        if (!api.isAudioEnabled())
+        if (!getJDA().isAudioEnabled())
             throw new IllegalStateException("Audio is disabled. Cannot retrieve an AudioManager while audio is disabled.");
 
-        final TLongObjectMap<AudioManager> managerMap = api.getAudioManagerMap();
+        final TLongObjectMap<AudioManager> managerMap = getJDA().getAudioManagerMap();
         AudioManager mng = managerMap.get(id);
         if (mng == null)
         {
             // No previous manager found -> create one
             synchronized (managerMap)
             {
+                GuildImpl cachedGuild = (GuildImpl) getJDA().getGuildById(id);
+                if (cachedGuild == null)
+                    throw new IllegalStateException("Cannot get an AudioManager instance on an uncached Guild");
                 mng = managerMap.get(id);
                 if (mng == null)
                 {
-                    mng = new AudioManagerImpl(this);
+                    mng = new AudioManagerImpl(cachedGuild);
                     managerMap.put(id, mng);
                 }
             }
@@ -505,14 +626,14 @@ public class GuildImpl implements Guild
     @Override
     public JDAImpl getJDA()
     {
-        return api;
+        return api.get();
     }
 
     @Override
     public List<GuildVoiceState> getVoiceStates()
     {
         return Collections.unmodifiableList(
-                getMembersMap().valueCollection().stream().map(Member::getVoiceState).collect(Collectors.toList()));
+                getMembersMap().valueCollection().stream().map(Member::getVoiceState).filter(Objects::nonNull).collect(Collectors.toList()));
     }
 
     @Override
@@ -542,12 +663,12 @@ public class GuildImpl implements Guild
     @Override
     public boolean checkVerification()
     {
-        if (api.getAccountType() == AccountType.BOT)
+        if (getJDA().getAccountType() == AccountType.BOT)
             return true;
         if(canSendVerification)
             return true;
 
-        if (api.getSelfUser().getPhoneNumber() != null)
+        if (getJDA().getSelfUser().getPhoneNumber() != null)
             return canSendVerification = true;
 
         switch (verificationLevel)
@@ -558,10 +679,10 @@ public class GuildImpl implements Guild
                 if (ChronoUnit.MINUTES.between(getSelfMember().getJoinDate(), OffsetDateTime.now()) < 10)
                     break;
             case MEDIUM:
-                if (ChronoUnit.MINUTES.between(MiscUtil.getCreationTime(api.getSelfUser()), OffsetDateTime.now()) < 5)
+                if (ChronoUnit.MINUTES.between(MiscUtil.getCreationTime(getJDA().getSelfUser()), OffsetDateTime.now()) < 5)
                     break;
             case LOW:
-                if (!api.getSelfUser().isVerified())
+                if (!getJDA().getSelfUser().isVerified())
                     break;
             case NONE:
                 canSendVerification = true;
@@ -677,6 +798,12 @@ public class GuildImpl implements Guild
         return this;
     }
 
+    public GuildImpl setOwnerId(long ownerId)
+    {
+        this.ownerId = ownerId;
+        return this;
+    }
+
     // -- Map getters --
 
     public TLongObjectMap<Category> getCategoriesMap()
@@ -746,14 +873,14 @@ public class GuildImpl implements Guild
 
         final Route.CompiledRoute route = Route.Invites.GET_GUILD_INVITES.compile(getId());
 
-        return new RestAction<List<Invite>>(api, route)
+        return new RestAction<List<Invite>>(getJDA(), route)
         {
             @Override
             protected void handleResponse(final Response response, final Request<List<Invite>> request)
             {
                 if (response.isOk())
                 {
-                    EntityBuilder entityBuilder = this.api.getEntityBuilder();
+                    EntityBuilder entityBuilder = api.get().getEntityBuilder();
                     JSONArray array = response.getArray();
                     List<Invite> invites = new ArrayList<>(array.length());
                     for (int i = 0; i < array.length(); i++)

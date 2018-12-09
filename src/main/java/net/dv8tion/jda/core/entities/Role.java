@@ -17,7 +17,6 @@ package net.dv8tion.jda.core.entities;
 
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.managers.RoleManager;
-import net.dv8tion.jda.core.managers.RoleManagerUpdatable;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
 import net.dv8tion.jda.core.requests.restaction.RoleAction;
 
@@ -29,6 +28,9 @@ import java.awt.Color;
  */
 public interface Role extends ISnowflake, IMentionable, IPermissionHolder, Comparable<Role>
 {
+    /** Used to keep consistency between color values used in the API */
+    int DEFAULT_COLOR_RAW = 0x1FFFFFFF; // java.awt.Color fills the MSB with FF, we just use 1F to provide better consistency
+
     /**
      * The hierarchical position of this {@link net.dv8tion.jda.core.entities.Role Role}
      * in the {@link net.dv8tion.jda.core.entities.Guild Guild} hierarchy. (higher value means higher role).
@@ -91,8 +93,18 @@ public interface Role extends ISnowflake, IMentionable, IPermissionHolder, Compa
      * The color this {@link net.dv8tion.jda.core.entities.Role Role} is displayed in.
      *
      * @return Color value of Role-color
+     *
+     * @see    #getColorRaw()
      */
     Color getColor();
+
+    /**
+     * The raw color RGB value used for this role
+     * <br>Defaults to {@link #DEFAULT_COLOR_RAW} if this role has no set color
+     *
+     * @return The raw RGB color value or default
+     */
+    int getColorRaw();
 
     /**
      * Whether this role is the @everyone role for its {@link net.dv8tion.jda.core.entities.Guild Guild},
@@ -155,8 +167,6 @@ public interface Role extends ISnowflake, IMentionable, IPermissionHolder, Compa
      *
      * @throws net.dv8tion.jda.core.exceptions.PermissionException
      *         If the logged in account does not have the {@link net.dv8tion.jda.core.Permission#MANAGE_ROLES} Permission and every Permission the provided Role has
-     * @throws net.dv8tion.jda.core.exceptions.GuildUnavailableException
-     *         If the guild is temporarily not {@link net.dv8tion.jda.core.entities.Guild#isAvailable() available}
      * @throws java.lang.IllegalArgumentException
      *         If the specified guild is {@code null}
      *
@@ -190,8 +200,6 @@ public interface Role extends ISnowflake, IMentionable, IPermissionHolder, Compa
      *
      * @throws net.dv8tion.jda.core.exceptions.PermissionException
      *         If the logged in account does not have the {@link net.dv8tion.jda.core.Permission#MANAGE_ROLES} Permission and every Permission the provided Role has
-     * @throws net.dv8tion.jda.core.exceptions.GuildUnavailableException
-     *         If the guild is temporarily not {@link net.dv8tion.jda.core.entities.Guild#isAvailable() available}
      *
      * @return {@link net.dv8tion.jda.core.requests.restaction.RoleAction RoleAction}
      *         <br>RoleAction with already copied values from the specified {@link net.dv8tion.jda.core.entities.Role Role}
@@ -205,21 +213,16 @@ public interface Role extends ISnowflake, IMentionable, IPermissionHolder, Compa
     /**
      * The {@link net.dv8tion.jda.core.managers.RoleManager RoleManager} for this Role.
      * In the RoleManager, you can modify all its values.
+     * <br>You modify multiple fields in one request by chaining setters before calling {@link net.dv8tion.jda.core.requests.RestAction#queue() RestAction.queue()}.
+     *
+     * @throws net.dv8tion.jda.core.exceptions.InsufficientPermissionException
+     *         If the currently logged in account does not have {@link net.dv8tion.jda.core.Permission#MANAGE_ROLES Permission.MANAGE_ROLES}
+     * @throws net.dv8tion.jda.core.exceptions.HierarchyException
+     *         If the currently logged in account does not have the required position to modify this role
      *
      * @return The RoleManager of this Role
      */
     RoleManager getManager();
-
-    /**
-     * The {@link net.dv8tion.jda.core.managers.RoleManagerUpdatable RoleManagerUpdatable} for this Role.
-     * In the Manager, you can modify all its values.
-     *
-     * <p>This can be used to bulk update role properties.
-     * It requires to call an {@code update()} method.
-     *
-     * @return The {@link net.dv8tion.jda.core.managers.RoleManagerUpdatable RoleManagerUpdatable} for this Role
-     */
-    RoleManagerUpdatable getManagerUpdatable();
 
     /**
      * Deletes this Role.

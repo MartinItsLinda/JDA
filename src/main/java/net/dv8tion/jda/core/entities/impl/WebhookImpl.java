@@ -19,34 +19,32 @@ package net.dv8tion.jda.core.entities.impl;
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.entities.*;
 import net.dv8tion.jda.core.managers.WebhookManager;
-import net.dv8tion.jda.core.managers.WebhookManagerUpdatable;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Requester;
 import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.Route;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
+import net.dv8tion.jda.core.utils.MiscUtil;
 import net.dv8tion.jda.webhook.WebhookClientBuilder;
+
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The implementation for {@link net.dv8tion.jda.core.entities.Webhook Webhook}
  *
  * @since  3.0
- * @author Florian Spieß
  */
 public class WebhookImpl implements Webhook
 {
-
-    protected volatile WebhookManagerUpdatable managerUpdatable = null;
     protected volatile WebhookManager manager = null;
 
-    private final Object mngLock = new Object();
+    private final ReentrantLock mngLock = new ReentrantLock();
     private final TextChannel channel;
     private final long id;
 
     private Member owner;
     private User user;
     private String token;
-
 
     public WebhookImpl(TextChannel channel, long id)
     {
@@ -99,12 +97,15 @@ public class WebhookImpl implements Webhook
     @Override
     public String getUrl()
     {
-        return Requester.DISCORD_API_PREFIX + "webhooks/" + getId() + "/" + getToken();
+        return Requester.DISCORD_API_PREFIX + "webhooks/" + getId() + (getToken() == null ? "" : "/" + getToken());
     }
 
     @Override
     public AuditableRestAction<Void> delete()
     {
+        if (isFake())
+            throw new IllegalStateException("Fake Webhooks (such as those retrieved from Audit Logs) "
+                    + "cannot be used for deletion!");
         Route.CompiledRoute route = Route.Webhooks.DELETE_TOKEN_WEBHOOK.compile(getId(), token);
         return new AuditableRestAction<Void>(getJDA(), route)
         {
@@ -122,31 +123,18 @@ public class WebhookImpl implements Webhook
     @Override
     public WebhookManager getManager()
     {
+        if (isFake())
+            throw new IllegalStateException("Fake Webhooks (such as those retrieved from Audit Logs) "
+                    + "cannot provide a WebhookManager!");
         WebhookManager mng = manager;
         if (mng == null)
         {
-            synchronized (mngLock)
+            mng = MiscUtil.locked(mngLock, () ->
             {
-                mng = manager;
-                if (mng == null)
-                    mng = manager = new WebhookManager(this);
-            }
-        }
-        return mng;
-    }
-
-    @Override
-    public WebhookManagerUpdatable getManagerUpdatable()
-    {
-        WebhookManagerUpdatable mng = managerUpdatable;
-        if (mng == null)
-        {
-            synchronized (mngLock)
-            {
-                mng = managerUpdatable;
-                if (mng == null)
-                    mng = managerUpdatable = new WebhookManagerUpdatable(this);
-            }
+                if (manager == null)
+                    manager = new WebhookManager(this);
+                return manager;
+            });
         }
         return mng;
     }
@@ -154,6 +142,9 @@ public class WebhookImpl implements Webhook
     @Override
     public WebhookClientBuilder newClient()
     {
+        if (isFake())
+            throw new IllegalStateException("Fake Webhooks (such as those retrieved from Audit Logs) "
+                    + "cannot be used to create a WebhookClient!");
         return new WebhookClientBuilder(id, token);
     }
 
@@ -161,6 +152,12 @@ public class WebhookImpl implements Webhook
     public long getIdLong()
     {
         return id;
+    }
+
+    @Override
+    public boolean isFake()
+    {
+        return token == null;
     }
 
     /* -- Impl Setters -- */

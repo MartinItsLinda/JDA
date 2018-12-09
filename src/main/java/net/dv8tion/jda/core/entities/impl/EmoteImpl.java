@@ -17,70 +17,83 @@
 package net.dv8tion.jda.core.entities.impl;
 
 import net.dv8tion.jda.client.managers.EmoteManager;
-import net.dv8tion.jda.client.managers.EmoteManagerUpdatable;
-import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.Permission;
-import net.dv8tion.jda.core.entities.Emote;
-import net.dv8tion.jda.core.entities.Guild;
+import net.dv8tion.jda.core.entities.ListedEmote;
 import net.dv8tion.jda.core.entities.Role;
+import net.dv8tion.jda.core.entities.User;
 import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.Route;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
+import net.dv8tion.jda.core.utils.MiscUtil;
+import net.dv8tion.jda.core.utils.cache.UpstreamReference;
 
 import java.util.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Represents a Custom Emote. (Emoji in official Discord API terminology)
  *
  * @since  2.2
- * @author Florian Spieß
  */
-public class EmoteImpl implements Emote
+public class EmoteImpl implements ListedEmote
 {
-
     private final long id;
-    private final GuildImpl guild;
-    private final JDAImpl api;
+    private final UpstreamReference<GuildImpl> guild;
+    private final UpstreamReference<JDAImpl> api;
     private final Set<Role> roles;
+    private final boolean fake;
 
-    private final Object mngLock = new Object();
+    private final ReentrantLock mngLock = new ReentrantLock();
     private volatile EmoteManager manager = null;
-    private volatile EmoteManagerUpdatable managerUpdatable = null;
 
     private boolean managed = false;
     private boolean animated = false;
     private String name;
+    private User user;
 
     public EmoteImpl(long id, GuildImpl guild)
     {
+        this(id, guild, false);
+    }
+
+    public EmoteImpl(long id, GuildImpl guild, boolean fake)
+    {
         this.id = id;
-        this.guild = guild;
-        this.api = guild.getJDA();
+        this.guild = new UpstreamReference<>(guild);
+        this.api = new UpstreamReference<>(guild.getJDA());
         this.roles = Collections.synchronizedSet(new HashSet<>());
+        this.fake = fake;
     }
 
     public EmoteImpl(long id, JDAImpl api)
     {
         this.id = id;
-        this.api = api;
+        this.api = new UpstreamReference<>(api);
         this.guild = null;
         this.roles = null;
+        this.fake = true;
     }
 
     @Override
-    public Guild getGuild()
+    public GuildImpl getGuild()
     {
-        return guild;
+        return guild == null ? null : guild.get();
     }
 
     @Override
     public List<Role> getRoles()
     {
-        if (isFake())
+        if (!canProvideRoles())
             throw new IllegalStateException("Unable to return roles because this emote is fake. (We do not know the origin Guild of this emote)");
         return Collections.unmodifiableList(new LinkedList<>(roles));
+    }
+
+    @Override
+    public boolean canProvideRoles()
+    {
+        return roles != null;
     }
 
     @Override
@@ -98,7 +111,7 @@ public class EmoteImpl implements Emote
     @Override
     public boolean isFake()
     {
-        return guild == null;
+        return fake;
     }
 
     @Override
@@ -108,9 +121,23 @@ public class EmoteImpl implements Emote
     }
 
     @Override
-    public JDA getJDA()
+    public JDAImpl getJDA()
     {
-        return api;
+        return api.get();
+    }
+
+    @Override
+    public User getUser()
+    {
+        if (!hasUser())
+            throw new IllegalStateException("This emote does not have a user");
+        return user;
+    }
+
+    @Override
+    public boolean hasUser()
+    {
+        return user != null;
     }
 
     @Override
@@ -119,28 +146,12 @@ public class EmoteImpl implements Emote
         EmoteManager m = manager;
         if (m == null)
         {
-            synchronized (mngLock)
+            m = MiscUtil.locked(mngLock, () ->
             {
-                m = manager;
-                if (m == null)
-                    m = manager = new EmoteManager(this);
-            }
-        }
-        return m;
-    }
-
-    @Override
-    public EmoteManagerUpdatable getManagerUpdatable()
-    {
-        EmoteManagerUpdatable m = managerUpdatable;
-        if (m == null)
-        {
-            synchronized (mngLock)
-            {
-                m = managerUpdatable;
-                if (m == null)
-                    m = managerUpdatable = new EmoteManagerUpdatable(this);
-            }
+                if (manager == null)
+                    manager = new EmoteManager(this);
+                return manager;
+            });
         }
         return m;
     }
@@ -154,11 +165,11 @@ public class EmoteImpl implements Emote
     @Override
     public AuditableRestAction<Void> delete()
     {
-        if (isFake())
+        if (getGuild() == null)
             throw new IllegalStateException("The emote you are trying to delete is not an actual emote we have access to (it is fake)!");
         if (managed)
             throw new UnsupportedOperationException("You cannot delete a managed emote!");
-        if (!guild.getSelfMember().hasPermission(Permission.MANAGE_EMOTES))
+        if (!getGuild().getSelfMember().hasPermission(Permission.MANAGE_EMOTES))
             throw new InsufficientPermissionException(Permission.MANAGE_EMOTES);
 
         Route.CompiledRoute route = Route.Emotes.DELETE_EMOTE.compile(getGuild().getId(), getId());
@@ -192,6 +203,12 @@ public class EmoteImpl implements Emote
     public EmoteImpl setManaged(boolean val)
     {
         this.managed = val;
+        return this;
+    }
+
+    public EmoteImpl setUser(User user)
+    {
+        this.user = user;
         return this;
     }
 
@@ -231,7 +248,7 @@ public class EmoteImpl implements Emote
     public EmoteImpl clone()
     {
         if (isFake()) return null;
-        EmoteImpl copy = new EmoteImpl(id, guild).setManaged(managed).setAnimated(animated).setName(name);
+        EmoteImpl copy = new EmoteImpl(id, getGuild()).setUser(user).setManaged(managed).setAnimated(animated).setName(name);
         copy.roles.addAll(roles);
         return copy;
 

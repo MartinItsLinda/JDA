@@ -15,16 +15,16 @@
  */
 package net.dv8tion.jda.core.managers.impl;
 
-import com.sun.jna.Platform;
-import net.dv8tion.jda.core.JDA;
+import net.dv8tion.jda.annotations.DeprecatedSince;
+import net.dv8tion.jda.annotations.ForRemoval;
 import net.dv8tion.jda.core.Permission;
 import net.dv8tion.jda.core.audio.AudioConnection;
 import net.dv8tion.jda.core.audio.AudioReceiveHandler;
 import net.dv8tion.jda.core.audio.AudioSendHandler;
+import net.dv8tion.jda.core.audio.SpeakingMode;
 import net.dv8tion.jda.core.audio.hooks.ConnectionListener;
 import net.dv8tion.jda.core.audio.hooks.ConnectionStatus;
 import net.dv8tion.jda.core.audio.hooks.ListenerProxy;
-import net.dv8tion.jda.core.entities.Guild;
 import net.dv8tion.jda.core.entities.Member;
 import net.dv8tion.jda.core.entities.VoiceChannel;
 import net.dv8tion.jda.core.entities.impl.GuildImpl;
@@ -33,25 +33,27 @@ import net.dv8tion.jda.core.exceptions.GuildUnavailableException;
 import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.managers.AudioManager;
 import net.dv8tion.jda.core.utils.Checks;
-import net.dv8tion.jda.core.utils.NativeUtil;
+import net.dv8tion.jda.core.utils.MiscUtil;
+import net.dv8tion.jda.core.utils.PermissionUtil;
 
-import java.io.IOException;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class AudioManagerImpl implements AudioManager
 {
+    @Deprecated
+    @ForRemoval
+    @DeprecatedSince("3.8.1")
     public static final ThreadGroup AUDIO_THREADS = new ThreadGroup("jda-audio");
-    //These values are set at the bottom of this file.
-    public static boolean AUDIO_SUPPORTED;
-    public static String OPUS_LIB_NAME;
-    protected static boolean initialized = false;
 
-    public final Object CONNECTION_LOCK = new Object();
+    public final ReentrantLock CONNECTION_LOCK = new ReentrantLock();
 
-    protected final JDAImpl api;
     protected final ListenerProxy connectionListener = new ListenerProxy();
     protected final GuildImpl guild;
-    protected AudioConnection audioConnection = null;
     protected VoiceChannel queuedAudioConnection = null;
+    protected AudioConnection audioConnection = null;
+    protected EnumSet<SpeakingMode> speakingModes = EnumSet.of(SpeakingMode.VOICE);
 
     protected AudioSendHandler sendHandler;
     protected AudioReceiveHandler receiveHandler;
@@ -66,8 +68,6 @@ public class AudioManagerImpl implements AudioManager
     public AudioManagerImpl(GuildImpl guild)
     {
         this.guild = guild;
-        this.api = this.guild.getJDA();
-        init(); //Just to make sure that the audio libs have been initialized.
     }
 
     public AudioConnection getAudioConnection()
@@ -80,24 +80,24 @@ public class AudioManagerImpl implements AudioManager
     {
         Checks.notNull(channel, "Provided VoiceChannel");
 
-        if (!AUDIO_SUPPORTED)
-            throw new UnsupportedOperationException("Sorry! Audio is disabled due to an internal JDA error! Contact Dev!");
-        if (!guild.equals(channel.getGuild()))
+//        if (!AUDIO_SUPPORTED)
+//            throw new UnsupportedOperationException("Sorry! Audio is disabled due to an internal JDA error! Contact Dev!");
+        if (!getGuild().equals(channel.getGuild()))
             throw new IllegalArgumentException("The provided VoiceChannel is not a part of the Guild that this AudioManager handles." +
                     "Please provide a VoiceChannel from the proper Guild");
-        if (!guild.isAvailable())
+        if (!getGuild().isAvailable())
             throw new GuildUnavailableException("Cannot open an Audio Connection with an unavailable guild. " +
                     "Please wait until this Guild is available to open a connection.");
-        final Member self = guild.getSelfMember();
-        if (!self.hasPermission(channel, Permission.VOICE_CONNECT) && !self.hasPermission(channel, Permission.VOICE_MOVE_OTHERS))
-            throw new InsufficientPermissionException(Permission.VOICE_CONNECT);
+        final Member self = getGuild().getSelfMember();
+        //if (!self.hasPermission(channel, Permission.VOICE_CONNECT))
+        //    throw new InsufficientPermissionException(Permission.VOICE_CONNECT);
 
         if (audioConnection == null)
         {
-            checkUserlimit(channel, self);
+            checkChannel(channel, self);
             //Start establishing connection, joining provided channel
             queuedAudioConnection = channel;
-            api.getClient().queueAudioConnect(channel);
+            getJDA().getClient().queueAudioConnect(channel);
         }
         else
         {
@@ -107,17 +107,20 @@ public class AudioManagerImpl implements AudioManager
             if (channel.equals(audioConnection.getChannel()))
                 return;
 
-            checkUserlimit(channel, self);
+            checkChannel(channel, self);
 
-            api.getClient().queueAudioConnect(channel);
+            getJDA().getClient().queueAudioConnect(channel);
             audioConnection.setChannel(channel);
         }
     }
 
-    private void checkUserlimit(VoiceChannel channel, Member self)
+    private void checkChannel(VoiceChannel channel, Member self)
     {
+        EnumSet<Permission> perms = Permission.toEnumSet(PermissionUtil.getEffectivePermission(channel, self));
+        if (!perms.contains(Permission.VOICE_CONNECT))
+            throw new InsufficientPermissionException(Permission.VOICE_CONNECT);
         final int userLimit = channel.getUserLimit(); // userLimit is 0 if no limit is set!
-        if (userLimit > 0 && !self.hasPermission(Permission.ADMINISTRATOR))
+        if (userLimit > 0 && !perms.contains(Permission.ADMINISTRATOR))
         {
             // Check if we can actually join this channel
             // - If there is a userlimit
@@ -126,7 +129,7 @@ public class AudioManagerImpl implements AudioManager
             // VOICE_MOVE_OTHERS allows access because you would be able to move people out to
             // open up a slot anyway
             if (userLimit <= channel.getMembers().size()
-                && !guild.getSelfMember().hasPermission(channel, Permission.VOICE_MOVE_OTHERS))
+                && !perms.contains(Permission.VOICE_MOVE_OTHERS))
             {
                 throw new InsufficientPermissionException(Permission.VOICE_MOVE_OTHERS,
                     "Unable to connect to VoiceChannel due to userlimit! Requires permission VOICE_MOVE_OTHERS to bypass");
@@ -137,30 +140,48 @@ public class AudioManagerImpl implements AudioManager
     @Override
     public void closeAudioConnection()
     {
-        closeAudioConnection(ConnectionStatus.NOT_CONNECTED);
+        getJDA().getAudioLifeCyclePool().execute(() -> {
+            getJDA().setContext();
+            closeAudioConnection(ConnectionStatus.NOT_CONNECTED);
+        });
     }
 
     public void closeAudioConnection(ConnectionStatus reason)
     {
-        synchronized (CONNECTION_LOCK)
+        MiscUtil.locked(CONNECTION_LOCK, () ->
         {
             this.queuedAudioConnection = null;
             if (audioConnection != null)
                 this.audioConnection.close(reason);
             else
-                this.api.getClient().queueAudioDisconnect(guild);
+                getJDA().getClient().queueAudioDisconnect(getGuild());
             this.audioConnection = null;
-        }
+        });
     }
 
     @Override
-    public JDA getJDA()
+    public void setSpeakingMode(Collection<SpeakingMode> mode)
     {
-        return api;
+        Checks.notEmpty(mode, "Speaking Mode");
+        this.speakingModes = EnumSet.copyOf(mode);
+        if (audioConnection != null)
+            audioConnection.setSpeakingMode(this.speakingModes);
     }
 
     @Override
-    public Guild getGuild()
+    public EnumSet<SpeakingMode> getSpeakingMode()
+    {
+        return EnumSet.copyOf(this.speakingModes);
+    }
+
+    @Override
+    public JDAImpl getJDA()
+    {
+        return getGuild().getJDA();
+    }
+
+    @Override
+    public GuildImpl getGuild()
     {
         return guild;
     }
@@ -245,7 +266,7 @@ public class AudioManagerImpl implements AudioManager
     public ConnectionStatus getConnectionStatus()
     {
         if (audioConnection != null)
-            return audioConnection.getWebSocket().getConnectionStatus();
+            return audioConnection.getConnectionStatus();
         else
             return ConnectionStatus.NOT_CONNECTED;
     }
@@ -255,7 +276,7 @@ public class AudioManagerImpl implements AudioManager
     {
         this.shouldReconnect = shouldReconnect;
         if (audioConnection != null)
-            audioConnection.getWebSocket().setAutoReconnect(shouldReconnect);
+            audioConnection.setAutoReconnect(shouldReconnect);
     }
 
     @Override
@@ -312,6 +333,7 @@ public class AudioManagerImpl implements AudioManager
         audioConnection.setSendingHandler(sendHandler);
         audioConnection.setReceivingHandler(receiveHandler);
         audioConnection.setQueueTimeout(queueTimeout);
+        audioConnection.setSpeakingMode(speakingModes);
     }
 
     public void prepareForRegionChange()
@@ -346,65 +368,19 @@ public class AudioManagerImpl implements AudioManager
             VoiceChannel channel = isConnected() ? getConnectedChannel() : getQueuedAudioConnection();
 
             //This is technically equivalent to an audio open/move packet.
-            api.getClient().queueAudioConnect(channel);
+            getJDA().getClient().queueAudioConnect(channel);
         }
     }
 
-    //Load the Opus library.
-    public static synchronized boolean init()
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void finalize()
     {
-        if(initialized)
-            return AUDIO_SUPPORTED;
-        initialized = true;
-        String nativesRoot  = null;
-        try
+        if (audioConnection != null)
         {
-            //The libraries that this is referencing are available in the src/main/resources/opus/ folder.
-            //Of course, when JDA is compiled that just becomes /opus/
-            nativesRoot = "/natives/" + Platform.RESOURCE_PREFIX + "/%s";
-            if (nativesRoot.contains("darwin")) //Mac
-                nativesRoot += ".dylib";
-            else if (nativesRoot.contains("win"))
-                nativesRoot += ".dll";
-            else if (nativesRoot.contains("linux"))
-                nativesRoot += ".so";
-            else
-                throw new UnsupportedOperationException();
-
-            NativeUtil.loadLibraryFromJar(String.format(nativesRoot, "libopus"));
+            LOG.warn("Finalized AudioManager with active audio connection. GuildId: {}", getGuild().getId());
+            audioConnection.close(ConnectionStatus.DISCONNECTED_REMOVED_FROM_GUILD);
         }
-        catch (Throwable e)
-        {
-            if (e instanceof UnsupportedOperationException)
-                LOG.error("Sorry, JDA's audio system doesn't support this system.\n" +
-                        "Supported Systems: Windows(x86, x64), Mac(x86, x64) and Linux(x86, x64)\n" +
-                        "Operating system: " + Platform.RESOURCE_PREFIX);
-            else if (e instanceof  IOException)
-            {
-                LOG.error("There was an IO Exception when setting up the temp files for audio.", e);
-            }
-            else if (e instanceof UnsatisfiedLinkError)
-            {
-                LOG.error("JDA encountered a problem when attempting to load the Native libraries. Contact a DEV.", e);
-            }
-            else
-            {
-                LOG.error("An unknown error occurred while attempting to setup JDA's audio system!", e);
-            }
-
-            nativesRoot = null;
-        }
-        finally
-        {
-            OPUS_LIB_NAME = nativesRoot != null ? String.format(nativesRoot, "libopus") : null;
-            AUDIO_SUPPORTED = nativesRoot != null;
-
-            if (AUDIO_SUPPORTED)
-                LOG.info("Audio System successfully setup!");
-            else
-                LOG.info("Audio System encountered problems while loading, thus, is disabled.");
-            return AUDIO_SUPPORTED;
-        }
-
+        audioConnection = null;
     }
 }

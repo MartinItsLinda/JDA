@@ -17,15 +17,14 @@
 package net.dv8tion.jda.client.entities;
 
 import net.dv8tion.jda.client.managers.ApplicationManager;
-import net.dv8tion.jda.client.managers.ApplicationManagerUpdatable;
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.Permission;
 import net.dv8tion.jda.core.entities.ISnowflake;
 import net.dv8tion.jda.core.requests.RestAction;
 
+import javax.annotation.CheckReturnValue;
 import java.util.Collection;
 import java.util.List;
-import javax.annotation.CheckReturnValue;
 
 /** 
  * Represents a Discord Application from its owning client point of view
@@ -136,24 +135,12 @@ public interface Application extends ISnowflake
 
     /**
      * Returns the {@link net.dv8tion.jda.client.managers.ApplicationManager ApplicationManager} for this Application.
-     * In the ApplicationManager, you can modify things like the name and icon of this Application.
+     * <br>In the ApplicationManager, you can modify things like the name and icon of this Application.
+     * You modify multiple fields in one request by chaining setters before calling {@link net.dv8tion.jda.core.requests.RestAction#queue() RestAction.queue()}.
      *
      * @return The ApplicationManager of this Channel
-     *
-     * @see    #getManagerUpdatable()
      */
     ApplicationManager getManager();
-
-    /**
-     * Returns the {@link net.dv8tion.jda.client.managers.ApplicationManagerUpdatable ApplicationManagerUpdatable} for this Application.
-     * In the ApplicationManager, you can modify things like the name and icon of this Application.
-     * <br>This can be used to bulk update application settings.
-     *
-     * @return The ApplicationManagerUpdatable of this Application
-     *
-     * @see    #getManager()
-     */
-    ApplicationManagerUpdatable getManagerUpdatable();
 
     /**
      * The name of this application.

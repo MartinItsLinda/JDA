@@ -15,21 +15,27 @@
  */
 package net.dv8tion.jda.bot.sharding;
 
-import java.util.*;
-import java.util.function.Function;
-import java.util.function.IntFunction;
-import java.util.stream.Collectors;
-
 import net.dv8tion.jda.bot.entities.ApplicationInfo;
 import net.dv8tion.jda.bot.utils.cache.ShardCacheView;
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.JDA.Status;
 import net.dv8tion.jda.core.OnlineStatus;
 import net.dv8tion.jda.core.entities.*;
+import net.dv8tion.jda.core.requests.Request;
+import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.RestAction;
+import net.dv8tion.jda.core.requests.Route;
 import net.dv8tion.jda.core.utils.Checks;
+import net.dv8tion.jda.core.utils.MiscUtil;
 import net.dv8tion.jda.core.utils.cache.CacheView;
 import net.dv8tion.jda.core.utils.cache.SnowflakeCacheView;
+import org.json.JSONObject;
+
+import javax.annotation.CheckReturnValue;
+import java.util.*;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.stream.Collectors;
 
 /**
  * This class acts as a manager for multiple shards.
@@ -74,6 +80,66 @@ public interface ShardManager
     {
         Checks.noneNull(listeners, "listeners");
         this.getShardCache().forEach(jda -> jda.removeEventListener(listeners));
+    }
+
+    /**
+     * Adds listeners provided by the listener provider to each shard to the event-listeners that will be used to handle events.
+     * The listener provider gets a shard id applied and is expected to return a listener.
+     *
+     * <p>Note: when using the {@link net.dv8tion.jda.core.hooks.InterfacedEventManager InterfacedEventListener} (default),
+     * given listener <b>must</b> be instance of {@link net.dv8tion.jda.core.hooks.EventListener EventListener}!
+     *
+     * @param  eventListenerProvider
+     *         The provider of listener(s) which will react to events.
+     *
+     * @throws java.lang.IllegalArgumentException
+     *         If the provided listener provider or any of the listeners or provides are {@code null}.
+     */
+    default void addEventListeners(final IntFunction<Object> eventListenerProvider)
+    {
+        Checks.notNull(eventListenerProvider, "event listener provider");
+        this.getShardCache().forEach(jda ->
+        {
+            Object listener = eventListenerProvider.apply(jda.getShardInfo().getShardId());
+            if (listener != null) jda.addEventListener(listener);
+        });
+    }
+
+    /**
+     * Remove listeners from shards by their id.
+     * The provider takes shard ids, and returns a collection of listeners that shall be removed from the respective
+     * shards.
+     *
+     * @param eventListenerProvider
+     *        gets shard ids applied and is expected to return a collection of listeners that shall be removed from
+     *        the respective shards
+     *
+     * @throws java.lang.IllegalArgumentException
+     *         If the provided event listeners provider is {@code null}.
+     */
+    default void removeEventListeners(final IntFunction<Collection<Object>> eventListenerProvider)
+    {
+        Checks.notNull(eventListenerProvider, "event listener provider");
+        this.getShardCache().forEach(jda ->
+            jda.removeEventListener(eventListenerProvider.apply(jda.getShardInfo().getShardId()))
+        );
+    }
+
+    /**
+     * Remove a listener provider. This will stop further created / restarted shards from getting a listener added by
+     * that provider.
+     *
+     * Default is a no-op for backwards compatibility, see implementations like
+     * {@link DefaultShardManager#removeEventListenerProvider(IntFunction)} for actual code
+     *
+     * @param  eventListenerProvider
+     *         The provider of listeners that shall be removed.
+     *
+     * @throws java.lang.IllegalArgumentException
+     *         If the provided listener provider is {@code null}.
+     */
+    default void removeEventListenerProvider(IntFunction<Object> eventListenerProvider)
+    {
     }
 
     /**
@@ -296,7 +362,7 @@ public interface ShardManager
      */
     default Guild getGuildById(final long id)
     {
-        return this.getGuildCache().getElementById(id);
+        return getGuildCache().getElementById(id);
     }
 
     /**
@@ -310,7 +376,23 @@ public interface ShardManager
      */
     default Guild getGuildById(final String id)
     {
-        return this.getGuildCache().getElementById(id);
+        return getGuildById(MiscUtil.parseSnowflake(id));
+    }
+
+    /**
+     * An unmodifiable list of all {@link net.dv8tion.jda.core.entities.Guild Guilds} that have the same name as the one provided.
+     * <br>If there are no {@link net.dv8tion.jda.core.entities.Guild Guilds} with the provided name, then this returns an empty list.
+     *
+     * @param  name
+     *         The name of the requested {@link net.dv8tion.jda.core.entities.Guild Guilds}.
+     * @param  ignoreCase
+     *         Whether to ignore case or not when comparing the provided name to each {@link net.dv8tion.jda.core.entities.Guild#getName()}.
+     *
+     * @return Possibly-empty list of all the {@link net.dv8tion.jda.core.entities.Guild Guilds} that all have the same name as the provided name.
+     */
+    default List<Guild> getGuildsByName(final String name, final boolean ignoreCase)
+    {
+        return this.getGuildCache().getElementsByName(name, ignoreCase);
     }
 
     /**
@@ -365,6 +447,88 @@ public interface ShardManager
     {
         Checks.notNull(users, "users");
         return this.getMutualGuilds(Arrays.asList(users));
+    }
+
+    /**
+     * Attempts to retrieve a {@link net.dv8tion.jda.core.entities.User User} object based on the provided id.
+     * <br>This first calls {@link #getUserById(long)}, and if the return is {@code null} then a request
+     * is made to the Discord servers.
+     *
+     * <p>The returned {@link net.dv8tion.jda.core.requests.RestAction RestAction} can encounter the following Discord errors:
+     * <ul>
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#UNKNOWN_USER ErrorResponse.UNKNOWN_USER}
+     *     <br>Occurs when the provided id does not refer to a {@link net.dv8tion.jda.core.entities.User User}
+     *     known by Discord. Typically occurs when developers provide an incomplete id (cut short).</li>
+     * </ul>
+     *
+     * @param  id
+     *         The id of the requested {@link net.dv8tion.jda.core.entities.User User}.
+     *
+     * @throws java.lang.IllegalArgumentException
+     *         If the provided id String is not a valid snowflake.
+     * @throws java.lang.IllegalStateException
+     *         If there isn't any active shards.
+     *
+     * @return {@link net.dv8tion.jda.core.requests.RestAction RestAction} - Type: {@link net.dv8tion.jda.core.entities.User User}
+     *         <br>On request, gets the User with id matching provided id from Discord.
+     */
+    @CheckReturnValue
+    default RestAction<User> retrieveUserById(String id)
+    {
+        return retrieveUserById(MiscUtil.parseSnowflake(id));
+    }
+
+    /**
+     * Attempts to retrieve a {@link net.dv8tion.jda.core.entities.User User} object based on the provided id.
+     * <br>This first calls {@link #getUserById(long)}, and if the return is {@code null} then a request
+     * is made to the Discord servers.
+     *
+     * <p>The returned {@link net.dv8tion.jda.core.requests.RestAction RestAction} can encounter the following Discord errors:
+     * <ul>
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#UNKNOWN_USER ErrorResponse.UNKNOWN_USER}
+     *     <br>Occurs when the provided id does not refer to a {@link net.dv8tion.jda.core.entities.User User}
+     *     known by Discord. Typically occurs when developers provide an incomplete id (cut short).</li>
+     * </ul>
+     *
+     * @param  id
+     *         The id of the requested {@link net.dv8tion.jda.core.entities.User User}.
+     *
+     * @throws java.lang.IllegalStateException
+     *         If there isn't any active shards.
+     *
+     * @return {@link net.dv8tion.jda.core.requests.RestAction RestAction} - Type: {@link net.dv8tion.jda.core.entities.User User}
+     *         <br>On request, gets the User with id matching provided id from Discord.
+     */
+    @CheckReturnValue
+    default RestAction<User> retrieveUserById(long id)
+    {
+        JDA api = null;
+        for (JDA shard : getShardCache())
+        {
+            api = shard;
+            User user = shard.getUserById(id);
+            if (user != null)
+                return new RestAction.EmptyRestAction<>(shard, user);
+        }
+
+        if (api == null)
+            throw new IllegalStateException("no shards active");
+
+        Route.CompiledRoute route = Route.Users.GET_USER.compile(Long.toUnsignedString(id));
+        return new RestAction<User>(api, route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<User> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+                JSONObject user = response.getObject();
+                request.onSuccess(api.get().getEntityBuilder().createFakeUser(user, false));
+            }
+        };
     }
 
     /**
@@ -790,7 +954,7 @@ public interface ShardManager
      * @see    net.dv8tion.jda.core.entities.Game#playing(String)
      * @see    net.dv8tion.jda.core.entities.Game#streaming(String, String)
      */
-    default void setGameProvider(final IntFunction<Game> gameProvider)
+    default void setGameProvider(final IntFunction<? extends Game> gameProvider)
     {
         this.getShardCache().forEach(jda -> jda.getPresence().setGame(gameProvider.apply(jda.getShardInfo().getShardId())));
     }

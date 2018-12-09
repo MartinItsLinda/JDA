@@ -154,6 +154,14 @@ public enum AuditLogKey
     CHANNEL_TOPIC("topic"),
 
     /**
+     * Change of the {@link net.dv8tion.jda.core.entities.TextChannel#getSlowmode() TextChannel.getSlowmode()} value.
+     * <br>Only for {@link net.dv8tion.jda.core.entities.ChannelType#TEXT ChannelType.TEXT}
+     *
+     * <p>Expected type: <b>Integer</b>
+     */
+    CHANNEL_SLOWMODE("rate_limit_per_user"),
+
+    /**
      * Change of the {@link net.dv8tion.jda.core.entities.VoiceChannel#getBitrate() VoiceChannel.getBitrate()} value.
      * <br>Only for {@link net.dv8tion.jda.core.entities.ChannelType#VOICE ChannelType.VOICE}
      *
@@ -293,7 +301,7 @@ public enum AuditLogKey
      *
      * <p>Expected type: <b>Boolean</b>
      */
-    ROLE_HOISTED("hoisted"),
+    ROLE_HOISTED("hoist"),
 
     /**
      * Change of the {@link net.dv8tion.jda.core.entities.Role#isMentionable() Role.isMentionable()} value.

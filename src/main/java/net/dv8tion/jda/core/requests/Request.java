@@ -16,6 +16,7 @@
 
 package net.dv8tion.jda.core.requests;
 
+import net.dv8tion.jda.core.audit.ThreadLocalReason;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.events.ExceptionEvent;
 import net.dv8tion.jda.core.events.http.HttpRequestEvent;
@@ -32,8 +33,8 @@ public class Request<T>
 {
     private final JDAImpl api;
     private final RestAction<T> restAction;
-    private final Consumer<T> onSuccess;
-    private final Consumer<Throwable> onFailure;
+    private final Consumer<? super T> onSuccess;
+    private final Consumer<? super Throwable> onFailure;
     private final BooleanSupplier checks;
     private final boolean shouldQueue;
     private final Route.CompiledRoute route;
@@ -41,9 +42,11 @@ public class Request<T>
     private final Object rawBody;
     private final CaseInsensitiveMap<String, String> headers;
 
+    private final String localReason;
+
     private boolean isCanceled = false;
 
-    public Request(RestAction<T> restAction, Consumer<T> onSuccess, Consumer<Throwable> onFailure,
+    public Request(RestAction<T> restAction, Consumer<? super T> onSuccess, Consumer<? super Throwable> onFailure,
                    BooleanSupplier checks, boolean shouldQueue, RequestBody body, Object rawBody,
                    Route.CompiledRoute route, CaseInsensitiveMap<String, String> headers)
     {
@@ -61,13 +64,15 @@ public class Request<T>
         this.headers = headers;
 
         this.api = (JDAImpl) restAction.getJDA();
+        this.localReason = ThreadLocalReason.getCurrent();
     }
 
     public void onSuccess(T successObj)
     {
-        api.pool.execute(() ->
+        api.getCallbackPool().execute(() ->
         {
-            try
+            try (ThreadLocalReason.Closable __ = ThreadLocalReason.closable(localReason);
+                 CallbackContext ___ = CallbackContext.getInstance())
             {
                 onSuccess.accept(successObj);
             }
@@ -89,15 +94,16 @@ public class Request<T>
         else
         {
             onFailure(ErrorResponseException.create(
-                    ErrorResponse.fromJSON(response.getObject()), response));
+                    ErrorResponse.fromJSON(response.optObject().orElse(null)), response));
         }
     }
 
     public void onFailure(Throwable failException)
     {
-        api.pool.execute(() ->
+        api.getCallbackPool().execute(() ->
         {
-            try
+            try (ThreadLocalReason.Closable __ = ThreadLocalReason.closable(localReason);
+                 CallbackContext ___ = CallbackContext.getInstance())
             {
                 onFailure.accept(failException);
                 if (failException instanceof Error)
@@ -122,12 +128,12 @@ public class Request<T>
         return restAction;
     }
 
-    public Consumer<T> getOnSuccess()
+    public Consumer<? super T> getOnSuccess()
     {
         return onSuccess;
     }
 
-    public Consumer<Throwable> getOnFailure()
+    public Consumer<? super Throwable> getOnFailure()
     {
         return onFailure;
     }

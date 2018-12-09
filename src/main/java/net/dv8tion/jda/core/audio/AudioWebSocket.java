@@ -1,11 +1,11 @@
 /*
- *     Copyright 2015-2018 Austin Keener & Michael Ritter & Florian Spieß
+ * Copyright 2015-2018 Austin Keener & Michael Ritter & Florian Spieß
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,8 @@
 package net.dv8tion.jda.core.audio;
 
 import com.neovisionaries.ws.client.*;
+import gnu.trove.map.TLongObjectMap;
+import net.dv8tion.jda.core.JDAInfo;
 import net.dv8tion.jda.core.audio.hooks.ConnectionListener;
 import net.dv8tion.jda.core.audio.hooks.ConnectionStatus;
 import net.dv8tion.jda.core.entities.Guild;
@@ -24,75 +26,77 @@ import net.dv8tion.jda.core.entities.User;
 import net.dv8tion.jda.core.entities.VoiceChannel;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.events.ExceptionEvent;
+import net.dv8tion.jda.core.managers.AudioManager;
 import net.dv8tion.jda.core.managers.impl.AudioManagerImpl;
 import net.dv8tion.jda.core.utils.JDALogger;
+import net.dv8tion.jda.core.utils.MiscUtil;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.slf4j.Logger;
-import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.net.*;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-public class AudioWebSocket extends WebSocketAdapter
+class AudioWebSocket extends WebSocketAdapter
 {
     public static final Logger LOG = JDALogger.getLog(AudioWebSocket.class);
     public static final int DISCORD_SECRET_KEY_LENGTH = 32;
-    public static final int AUDIO_GATEWAY_VERSION = 3;
+    private static final byte[] UDP_KEEP_ALIVE= { (byte) 0xC9, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-    protected final ConnectionListener listener;
-    protected final ScheduledThreadPoolExecutor keepAlivePool;
-    protected AudioConnection audioConnection;
-    protected ConnectionStatus connectionStatus = ConnectionStatus.NOT_CONNECTED;
+    protected volatile AudioEncryption encryption;
+    protected WebSocket socket;
 
-    private final JDAImpl api;
+    private final AudioConnection audioConnection;
+    private final ConnectionListener listener;
+    private final ScheduledThreadPoolExecutor keepAlivePool;
     private final Guild guild;
-    private final String endpoint;
     private final String sessionId;
     private final String token;
-    private boolean connected = false;
+    private final String wssEndpoint;
+
+    private volatile ConnectionStatus connectionStatus = ConnectionStatus.NOT_CONNECTED;
     private boolean ready = false;
     private boolean reconnecting = false;
-    private Future<?> keepAliveHandle;
-    private String wssEndpoint;
     private boolean shouldReconnect;
-
     private int ssrc;
     private byte[] secretKey;
-    private DatagramSocket udpSocket;
+    private Future<?> keepAliveHandle;
     private InetSocketAddress address;
 
     private volatile boolean shutdown = false;
 
-    public WebSocket socket;
-
-    public AudioWebSocket(ConnectionListener listener, String endpoint, JDAImpl api, Guild guild, String sessionId, String token, boolean shouldReconnect)
+    protected AudioWebSocket(
+            AudioConnection audioConnection, ConnectionListener listener, String endpoint, Guild guild,
+            String sessionId, String token, boolean shouldReconnect)
     {
+        this.audioConnection = audioConnection;
         this.listener = listener;
-        this.endpoint = endpoint;
-        this.api = api;
         this.guild = guild;
         this.sessionId = sessionId;
         this.token = token;
         this.shouldReconnect = shouldReconnect;
 
-        keepAlivePool = api.getAudioKeepAlivePool();
+        keepAlivePool = getJDA().getAudioLifeCyclePool();
 
         //Append the Secure Websocket scheme so that our websocket library knows how to connect
-        wssEndpoint = String.format("wss://%s/?v=%d", endpoint, AUDIO_GATEWAY_VERSION);
+        wssEndpoint = String.format("wss://%s/?v=%d", endpoint, JDAInfo.AUDIO_GATEWAY_VERSION);
 
         if (sessionId == null || sessionId.isEmpty())
             throw new IllegalArgumentException("Cannot create a voice connection using a null/empty sessionId!");
         if (token == null || token.isEmpty())
             throw new IllegalArgumentException("Cannot create a voice connection using a null/empty token!");
     }
+
+    /* Used by AudioConnection */
 
     protected void send(String message)
     {
@@ -108,12 +112,145 @@ public class AudioWebSocket extends WebSocketAdapter
             .toString());
     }
 
+    protected void startConnection()
+    {
+        if (!reconnecting && socket != null)
+            throw new IllegalStateException("Somehow, someway, this AudioWebSocket has already attempted to start a connection!");
+
+        try
+        {
+            socket = getJDA().getWebSocketFactory()
+                             .createSocket(wssEndpoint)
+                             .addListener(this);
+            changeStatus(ConnectionStatus.CONNECTING_AWAITING_WEBSOCKET_CONNECT);
+            socket.connectAsynchronously();
+        }
+        catch (IOException e)
+        {
+            LOG.warn("Encountered IOException while attempting to connect: {}\nClosing connection and attempting to reconnect.", e.getMessage());
+            this.close(ConnectionStatus.ERROR_WEBSOCKET_UNABLE_TO_CONNECT);
+        }
+    }
+
+    protected void close(final ConnectionStatus closeStatus)
+    {
+        //Makes sure we don't run this method again after the socket.close(1000) call fires onDisconnect
+        if (shutdown)
+            return;
+        locked((manager) ->
+        {
+            if (shutdown)
+                return;
+            ConnectionStatus status = closeStatus;
+            ready = false;
+            shutdown = true;
+            stopKeepAlive();
+
+            if (audioConnection.udpSocket != null)
+                audioConnection.udpSocket.close();
+            if (socket != null)
+                socket.sendClose();
+
+            audioConnection.shutdown();
+
+            VoiceChannel disconnectedChannel = manager.getConnectedChannel();
+            if (disconnectedChannel == null)
+                disconnectedChannel = manager.getQueuedAudioConnection();
+
+            manager.setAudioConnection(null);
+
+            //Verify that it is actually a lost of connection and not due the connected channel being deleted.
+            JDAImpl api = getJDA();
+            if (status == ConnectionStatus.ERROR_LOST_CONNECTION)
+            {
+                //Get guild from JDA, don't use [guild] field to make sure that we don't have
+               // a problem of an out of date guild stored in [guild] during a possible mWS invalidate.
+                Guild connGuild = api.getGuildById(guild.getIdLong());
+                if (connGuild != null)
+                {
+                    if (connGuild.getVoiceChannelById(audioConnection.getChannel().getIdLong()) == null)
+                        status = ConnectionStatus.DISCONNECTED_CHANNEL_DELETED;
+                }
+            }
+
+            changeStatus(status);
+
+            //decide if we reconnect.
+            if (shouldReconnect
+                    && status.shouldReconnect() //indicated that the connection was purposely closed. don't reconnect.
+                    && status != ConnectionStatus.AUDIO_REGION_CHANGE) //Already handled.
+            {
+                if (disconnectedChannel == null)
+                {
+                    LOG.debug("Cannot reconnect due to null voice channel");
+                    return;
+                }
+                manager.setQueuedAudioConnection(disconnectedChannel);
+                api.getClient().queueAudioReconnect(disconnectedChannel);
+            }
+            else if (status == ConnectionStatus.DISCONNECTED_REMOVED_FROM_GUILD)
+            {
+                //Remove audio manager as we are no longer in the guild
+                TLongObjectMap<AudioManager> audioManagerMap = api.getAudioManagerMap();
+                synchronized (audioManagerMap)
+                {
+                    audioManagerMap.remove(guild.getIdLong());
+                }
+            }
+            else if (status != ConnectionStatus.AUDIO_REGION_CHANGE)
+            {
+                api.getClient().queueAudioDisconnect(guild);
+            }
+        });
+    }
+
+    protected void changeStatus(ConnectionStatus newStatus)
+    {
+        connectionStatus = newStatus;
+        listener.onStatusChange(newStatus);
+    }
+
+    protected void setAutoReconnect(boolean shouldReconnect)
+    {
+        this.shouldReconnect = shouldReconnect;
+    }
+
+    protected ConnectionStatus getConnectionStatus()
+    {
+        return connectionStatus;
+    }
+
+    protected InetSocketAddress getAddress()
+    {
+        return address;
+    }
+
+    protected byte[] getSecretKey()
+    {
+        return secretKey;
+    }
+
+    protected int getSSRC()
+    {
+        return ssrc;
+    }
+
+    protected boolean isReady()
+    {
+        return ready;
+    }
+
+    /* TCP Listeners */
+
+    @Override
+    public void onThreadStarted(WebSocket websocket, ThreadType threadType, Thread thread)
+    {
+        getJDA().setContext();
+    }
+
     @Override
     public void onConnected(WebSocket websocket, Map<String, List<String>> headers)
     {
-        //writing thread
-        if (api.getContextMap() != null)
-            MDC.setContextMap(api.getContextMap());
         if (shutdown)
         {
             //Somehow this AudioWebSocket was shutdown before we finished connecting....
@@ -126,21 +263,16 @@ public class AudioWebSocket extends WebSocketAdapter
             resume();
         else
             identify();
-        connected = true;
+        changeStatus(ConnectionStatus.CONNECTING_AWAITING_AUTHENTICATION);
+        audioConnection.prepareReady();
         reconnecting = false;
-        changeStatus(ConnectionStatus.CONNECTING_AWAITING_AUTHENTICATING);
-        if (!reconnecting)
-            audioConnection.ready();
     }
 
     @Override
     public void onTextMessage(WebSocket websocket, String message)
     {
-        //reading thread
         try
         {
-            if (api.getContextMap() != null)
-                MDC.setContextMap(api.getContextMap());
             handleEvent(new JSONObject(message));
         }
         catch (Exception ex)
@@ -148,6 +280,93 @@ public class AudioWebSocket extends WebSocketAdapter
             LOG.error("Encountered exception trying to handle an event message: {}", message, ex);
         }
     }
+
+    @Override
+    public void onDisconnected(WebSocket websocket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer)
+    {
+        if (shutdown)
+            return;
+        LOG.debug("The Audio connection was closed!\nBy remote? {}", closedByServer);
+        if (serverCloseFrame != null)
+        {
+            LOG.debug("Reason: {}\nClose code: {}", serverCloseFrame.getCloseReason(), serverCloseFrame.getCloseCode());
+            final int code = serverCloseFrame.getCloseCode();
+            final VoiceCode.Close closeCode = VoiceCode.Close.from(code);
+            switch (closeCode)
+            {
+                case SERVER_NOT_FOUND:
+                case SERVER_CRASH:
+                case INVALID_SESSION:
+                    this.close(ConnectionStatus.ERROR_CANNOT_RESUME);
+                    break;
+                case AUTHENTICATION_FAILED:
+                    this.close(ConnectionStatus.DISCONNECTED_AUTHENTICATION_FAILURE);
+                    break;
+                default:
+                    this.reconnect();
+            }
+            return;
+        }
+        if (clientCloseFrame != null)
+        {
+            LOG.debug("ClientReason: {}\nClientCode: {}", clientCloseFrame.getCloseReason(), clientCloseFrame.getCloseCode());
+            if (clientCloseFrame.getCloseCode() != 1000)
+            {
+                // unexpected close -> error -> attempt resume
+                this.reconnect();
+                return;
+            }
+        }
+        this.close(ConnectionStatus.NOT_CONNECTED);
+    }
+
+    @Override
+    public void onUnexpectedError(WebSocket websocket, WebSocketException cause)
+    {
+        handleCallbackError(websocket, cause);
+    }
+
+    @Override
+    public void handleCallbackError(WebSocket websocket, Throwable cause)
+    {
+        LOG.error("There was some audio websocket error", cause);
+        JDAImpl api = getJDA();
+        api.getEventManager().handle(new ExceptionEvent(api, cause, true));
+    }
+
+    @Override
+    public void onThreadCreated(WebSocket websocket, ThreadType threadType, Thread thread)
+    {
+        final String identifier = getJDA().getIdentifierString();
+        final String guildId = guild.getId();
+        switch (threadType)
+        {
+            case CONNECT_THREAD:
+                thread.setName(identifier + " AudioWS-ConnectThread (guildId: " + guildId + ')');
+                break;
+            case FINISH_THREAD:
+                thread.setName(identifier + " AudioWS-FinishThread (guildId: " + guildId + ')');
+                break;
+            case WRITING_THREAD:
+                thread.setName(identifier + " AudioWS-WriteThread (guildId: " + guildId + ')');
+                break;
+            case READING_THREAD:
+                thread.setName(identifier + " AudioWS-ReadThread (guildId: " + guildId + ')');
+                break;
+            default:
+                thread.setName(identifier + " AudioWS-" + threadType + " (guildId: " + guildId + ')');
+        }
+    }
+
+    @Override
+    public void onConnectError(WebSocket webSocket, WebSocketException e)
+    {
+        LOG.warn("Failed to establish websocket connection: {} - {}\nClosing connection and attempting to reconnect.",
+                                 e.getError(), e.getMessage());
+        this.close(ConnectionStatus.ERROR_WEBSOCKET_UNABLE_TO_CONNECT);
+    }
+
+    /* Internals */
 
     private void handleEvent(JSONObject contentAll)
     {
@@ -161,8 +380,7 @@ public class AudioWebSocket extends WebSocketAdapter
                 final JSONObject payload = contentAll.getJSONObject("d");
                 final int interval = payload.getInt("heartbeat_interval");
                 stopKeepAlive();
-                setupKeepAlive(interval / 2);
-                //FIXME: discord will rollout a working interval once that is done we need to use it properly
+                setupKeepAlive(interval);
                 break;
             }
             case VoiceCode.READY:
@@ -171,6 +389,19 @@ public class AudioWebSocket extends WebSocketAdapter
                 JSONObject content = contentAll.getJSONObject("d");
                 ssrc = content.getInt("ssrc");
                 int port = content.getInt("port");
+                String ip = content.getString("ip");
+                JSONArray modes = content.getJSONArray("modes");
+                encryption = AudioEncryption.getPreferredMode(modes);
+                if (encryption == null)
+                {
+                    close(ConnectionStatus.ERROR_UNSUPPORTED_ENCRYPTION_MODES);
+                    LOG.error("None of the provided encryption modes are supported: {}", modes);
+                    return;
+                }
+                else
+                {
+                    LOG.debug("Using encryption mode " + encryption.getKey());
+                }
 
                 //Find our external IP and Port using Discord
                 InetSocketAddress externalIpAndPort;
@@ -179,7 +410,7 @@ public class AudioWebSocket extends WebSocketAdapter
                 int tries = 0;
                 do
                 {
-                    externalIpAndPort = handleUdpDiscovery(new InetSocketAddress(endpoint, port), ssrc);
+                    externalIpAndPort = handleUdpDiscovery(new InetSocketAddress(ip, port), ssrc);
                     tries++;
                     if (externalIpAndPort == null && tries > 5)
                     {
@@ -191,9 +422,9 @@ public class AudioWebSocket extends WebSocketAdapter
                 final JSONObject object = new JSONObject()
                         .put("protocol", "udp")
                         .put("data", new JSONObject()
-                            .put("address", externalIpAndPort.getHostString())
-                            .put("port", externalIpAndPort.getPort())
-                            .put("mode", "xsalsa20_poly1305"));   //Discord requires encryption
+                                .put("address", externalIpAndPort.getHostString())
+                                .put("port", externalIpAndPort.getPort())
+                                .put("mode", encryption.getKey())); //Discord requires encryption
                 send(VoiceCode.SELECT_PROTOCOL, object);
                 changeStatus(ConnectionStatus.CONNECTING_AWAITING_READY);
                 break;
@@ -238,7 +469,7 @@ public class AudioWebSocket extends WebSocketAdapter
             {
                 LOG.trace("-> USER_SPEAKING_UPDATE {}", contentAll);
                 final JSONObject content = contentAll.getJSONObject("d");
-                final boolean speaking = content.getBoolean("speaking");
+                final EnumSet<SpeakingMode> speaking = SpeakingMode.getModes(content.getInt("speaking"));
                 final int ssrc = content.getInt("ssrc");
                 final long userId = content.getLong("user_id");
 
@@ -246,7 +477,7 @@ public class AudioWebSocket extends WebSocketAdapter
                 if (user == null)
                 {
                     //more relevant for audio connection
-                    AudioConnection.LOG.trace("Got an Audio USER_SPEAKING_UPDATE for a non-existent User. JSON: {}", contentAll);
+                    LOG.trace("Got an Audio USER_SPEAKING_UPDATE for a non-existent User. JSON: {}", contentAll);
                     break;
                 }
 
@@ -263,9 +494,10 @@ public class AudioWebSocket extends WebSocketAdapter
                 break;
             }
             case 12:
+            case 14:
             {
-                LOG.trace("-> OP 12 {}", contentAll);
-                // ignore op 12 for now
+                LOG.trace("-> OP {} {}", opCode, contentAll);
+                // ignore op 12 and 14 for now
                 break;
             }
             default:
@@ -273,95 +505,11 @@ public class AudioWebSocket extends WebSocketAdapter
         }
     }
 
-    @Override
-    public void onDisconnected(WebSocket websocket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer)
-    {
-        LOG.debug("The Audio connection was closed!\nBy remote? {}", closedByServer);
-        if (serverCloseFrame != null)
-        {
-            LOG.debug("Reason: {}\nClose code: {}", serverCloseFrame.getCloseReason(), serverCloseFrame.getCloseCode());
-            final int code = serverCloseFrame.getCloseCode();
-            final VoiceCode.Close closeCode = VoiceCode.Close.from(code);
-            switch (closeCode)
-            {
-                case SERVER_NOT_FOUND:
-                case SERVER_CRASH:
-                case INVALID_SESSION:
-                    this.close(ConnectionStatus.ERROR_CANNOT_RESUME);
-                    break;
-                case AUTHENTICATION_FAILED:
-                    this.close(ConnectionStatus.DISCONNECTED_AUTHENTICATION_FAILURE);
-                    break;
-                default:
-                    this.reconnect(ConnectionStatus.ERROR_LOST_CONNECTION);
-            }
-            return;
-        }
-        if (clientCloseFrame != null)
-        {
-            LOG.debug("ClientReason: {}\nClientCode: {}", clientCloseFrame.getCloseReason(), clientCloseFrame.getCloseCode());
-            if (clientCloseFrame.getCloseCode() != 1000)
-            {
-                // unexpected close -> error -> attempt resume
-                this.reconnect(ConnectionStatus.ERROR_LOST_CONNECTION);
-                return;
-            }
-        }
-        this.close(ConnectionStatus.NOT_CONNECTED);
-    }
-
-    @Override
-    public void onUnexpectedError(WebSocket websocket, WebSocketException cause)
-    {
-        handleCallbackError(websocket, cause);
-    }
-
-    @Override
-    public void handleCallbackError(WebSocket websocket, Throwable cause)
-    {
-        MDC.setContextMap(api.getContextMap());
-        LOG.error("There was some audio websocket error", cause);
-        api.getEventManager().handle(new ExceptionEvent(api, cause, true));
-    }
-
-    @Override
-    public void onThreadCreated(WebSocket websocket, ThreadType threadType, Thread thread) throws Exception
-    {
-        final String identifier = api.getIdentifierString();
-        final String guildId = guild.getId();
-        switch (threadType)
-        {
-            case CONNECT_THREAD:
-                thread.setName(identifier + " AudioWS-ConnectThread (guildId: " + guildId + ')');
-                break;
-            case FINISH_THREAD:
-                thread.setName(identifier + " AudioWS-FinishThread (guildId: " + guildId + ')');
-                break;
-            case WRITING_THREAD:
-                thread.setName(identifier + " AudioWS-WriteThread (guildId: " + guildId + ')');
-                break;
-            case READING_THREAD:
-                thread.setName(identifier + " AudioWS-ReadThread (guildId: " + guildId + ')');
-                break;
-            default:
-                thread.setName(identifier + " AudioWS-" + threadType + " (guildId: " + guildId + ')');
-        }
-    }
-
-    @Override
-    public void onConnectError(WebSocket webSocket, WebSocketException e)
-    {
-        MDC.setContextMap(api.getContextMap());
-        LOG.warn("Failed to establish websocket connection: {} - {}\nClosing connection and attempting to reconnect.",
-            e.getError(), e.getMessage());
-        this.close(ConnectionStatus.ERROR_WEBSOCKET_UNABLE_TO_CONNECT);
-    }
-
     private void identify()
     {
         JSONObject connectObj = new JSONObject()
                 .put("server_id", guild.getId())
-                .put("user_id", api.getSelfUser().getId())
+                .put("user_id", getJDA().getSelfUser().getId())
                 .put("session_id", sessionId)
                 .put("token", token);
         send(VoiceCode.IDENTIFY, connectObj);
@@ -377,37 +525,18 @@ public class AudioWebSocket extends WebSocketAdapter
         send(VoiceCode.RESUME, resumeObj);
     }
 
-    public void startConnection()
+    private JDAImpl getJDA()
     {
-        if (!reconnecting && socket != null)
-            throw new IllegalStateException("Somehow, someway, this AudioWebSocket has already attempted to start a connection!");
-
-        try
-        {
-            socket = api.getWebSocketFactory()
-                    .createSocket(wssEndpoint)
-                    .addListener(this);
-            changeStatus(ConnectionStatus.CONNECTING_AWAITING_WEBSOCKET_CONNECT);
-            socket.connectAsynchronously();
-        }
-        catch (IOException e)
-        {
-            LOG.warn("Encountered IOException while attempting to connect: {}\nClosing connection and attempting to reconnect.",
-                e.getMessage());
-            this.close(ConnectionStatus.ERROR_WEBSOCKET_UNABLE_TO_CONNECT);
-        }
+        return audioConnection.getJDA();
     }
 
-    private void locked(Consumer<AudioManagerImpl> runnable)
+    private void locked(Consumer<AudioManagerImpl> consumer)
     {
         AudioManagerImpl manager = (AudioManagerImpl) guild.getAudioManager();
-        synchronized (manager.CONNECTION_LOCK)
-        {
-            runnable.accept(manager);
-        }
+        MiscUtil.locked(manager.CONNECTION_LOCK, () -> consumer.accept(manager));
     }
 
-    public void reconnect(ConnectionStatus closeStatus)
+    private void reconnect()
     {
         if (shutdown)
             return;
@@ -415,103 +544,11 @@ public class AudioWebSocket extends WebSocketAdapter
         {
             if (shutdown)
                 return;
-            connected = false;
             ready = false;
             reconnecting = true;
-            changeStatus(closeStatus);
+            changeStatus(ConnectionStatus.ERROR_LOST_CONNECTION);
             startConnection();
         });
-    }
-
-    public void close(final ConnectionStatus closeStatus)
-    {
-        //Makes sure we don't run this method again after the socket.close(1000) call fires onDisconnect
-        if (shutdown)
-            return;
-        locked((manager) ->
-        {
-            if (shutdown)
-                return;
-            ConnectionStatus status = closeStatus;
-            connected = false;
-            ready = false;
-            shutdown = true;
-            stopKeepAlive();
-
-            if (udpSocket != null)
-                udpSocket.close();
-            if (socket != null && socket.isOpen())
-                socket.sendClose(1000);
-
-            VoiceChannel disconnectedChannel;
-            if (audioConnection != null)
-                audioConnection.shutdown();
-
-            if (manager.getConnectedChannel() != null)
-                disconnectedChannel = manager.getConnectedChannel();
-            else
-                disconnectedChannel = manager.getQueuedAudioConnection();
-
-            manager.setAudioConnection(null);
-
-            //Verify that it is actually a lost of connection and not due the connected channel being deleted.
-            if (status == ConnectionStatus.ERROR_LOST_CONNECTION)
-            {
-                //Get guild from JDA, don't use [guild] field to make sure that we don't have
-                // a problem of an out of date guild stored in [guild] during a possible mWS invalidate.
-                Guild connGuild = api.getGuildById(guild.getIdLong());
-                if (connGuild != null)
-                {
-                    if (connGuild.getVoiceChannelById(audioConnection.getChannel().getIdLong()) == null)
-                        status = ConnectionStatus.DISCONNECTED_CHANNEL_DELETED;
-                }
-            }
-
-            changeStatus(status);
-
-            //decide if we reconnect.
-            if (shouldReconnect
-                && status != ConnectionStatus.NOT_CONNECTED    //indicated that the connection was purposely closed. don't reconnect.
-                && status != ConnectionStatus.DISCONNECTED_CHANNEL_DELETED
-                && status != ConnectionStatus.DISCONNECTED_REMOVED_FROM_GUILD
-                && status != ConnectionStatus.AUDIO_REGION_CHANGE) //Already handled.
-            {
-                manager.setQueuedAudioConnection(disconnectedChannel);
-                api.getClient().queueAudioReconnect(disconnectedChannel);
-            }
-            else if (status != ConnectionStatus.AUDIO_REGION_CHANGE)
-            {
-                api.getClient().queueAudioDisconnect(guild);
-            }
-        });
-    }
-
-    public DatagramSocket getUdpSocket()
-    {
-        return udpSocket;
-    }
-
-    public InetSocketAddress getAddress()
-    {
-        return address;
-    }
-
-    public byte[] getSecretKey()
-    {
-        return Arrays.copyOf(secretKey, secretKey.length);
-    }
-
-    public int getSSRC()
-    {
-        return ssrc;
-    }
-    public boolean isConnected()
-    {
-        return connected;
-    }
-    public boolean isReady()
-    {
-        return ready;
     }
 
     private InetSocketAddress handleUdpDiscovery(InetSocketAddress address, int ssrc)
@@ -520,7 +557,7 @@ public class AudioWebSocket extends WebSocketAdapter
         //This is called UDP hole punching.
         try
         {
-            udpSocket = new DatagramSocket();   //Use UDP, not TCP.
+            audioConnection.udpSocket = new DatagramSocket();   //Use UDP, not TCP.
 
             //Create a byte array of length 70 containing our ssrc.
             ByteBuffer buffer = ByteBuffer.allocate(70);    //70 taken from https://github.com/Rapptz/discord.py/blob/async/discord/voice_client.py#L208
@@ -528,12 +565,12 @@ public class AudioWebSocket extends WebSocketAdapter
 
             //Construct our packet to be sent loaded with the byte buffer we store the ssrc in.
             DatagramPacket discoveryPacket = new DatagramPacket(buffer.array(), buffer.array().length, address);
-            udpSocket.send(discoveryPacket);
+            audioConnection.udpSocket.send(discoveryPacket);
 
             //Discord responds to our packet, returning a packet containing our external ip and the port we connected through.
             DatagramPacket receivedPacket = new DatagramPacket(new byte[70], 70);   //Give a buffer the same size as the one we sent.
-            udpSocket.setSoTimeout(1000);
-            udpSocket.receive(receivedPacket);
+            audioConnection.udpSocket.setSoTimeout(1000);
+            audioConnection.udpSocket.receive(receivedPacket);
 
             //The byte array returned by discord containing our external ip and the port that we used
             //to connect to discord with.
@@ -593,18 +630,15 @@ public class AudioWebSocket extends WebSocketAdapter
 
         Runnable keepAliveRunnable = () ->
         {
-            if (socket != null && socket.isOpen())
+            getJDA().setContext();
+            if (socket != null && socket.isOpen()) //TCP keep-alive
                 send(VoiceCode.HEARTBEAT, System.currentTimeMillis());
-            if (udpSocket != null && !udpSocket.isClosed())
+            if (audioConnection.udpSocket != null && !audioConnection.udpSocket.isClosed()) //UDP keep-alive
             {
-                long seq = 0;
                 try
                 {
-                    ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES + 1);
-                    buffer.put((byte)0xC9);
-                    buffer.putLong(seq);
-                    DatagramPacket keepAlivePacket = new DatagramPacket(buffer.array(), buffer.array().length, address);
-                    udpSocket.send(keepAlivePacket);
+                    DatagramPacket keepAlivePacket = new DatagramPacket(UDP_KEEP_ALIVE, UDP_KEEP_ALIVE.length, address);
+                    audioConnection.udpSocket.send(keepAlivePacket);
                 }
                 catch (NoRouteToHostException e)
                 {
@@ -628,32 +662,18 @@ public class AudioWebSocket extends WebSocketAdapter
                                                       // related to the threadpool shutdown.
     }
 
-    public void changeStatus(ConnectionStatus newStatus)
-    {
-        connectionStatus = newStatus;
-        listener.onStatusChange(newStatus);
-    }
-
     private User getUser(final long userId)
     {
+        JDAImpl api = getJDA();
         User user = api.getUserById(userId);
         if (user != null)
             return user;
         return api.getFakeUserMap().get(userId);
     }
 
-    public ConnectionStatus getConnectionStatus()
-    {
-        return connectionStatus;
-    }
-
-    public void setAutoReconnect(boolean shouldReconnect)
-    {
-        this.shouldReconnect = shouldReconnect;
-    }
-
     @Override
-    protected void finalize() throws Throwable
+    @SuppressWarnings("deprecation")
+    protected void finalize()
     {
         if (!shutdown)
         {
@@ -661,32 +681,4 @@ public class AudioWebSocket extends WebSocketAdapter
             close(ConnectionStatus.NOT_CONNECTED);
         }
     }
-
-    public static class KeepAliveThreadFactory implements ThreadFactory
-    {
-        final String identifier;
-        final AtomicInteger threadCount = new AtomicInteger(1);
-        final ConcurrentMap<String, String> contextMap;
-
-        public KeepAliveThreadFactory(JDAImpl api)
-        {
-            contextMap = api.getContextMap();
-            identifier = api.getIdentifierString() + " Audio-KeepAlive Pool";
-        }
-
-        @Override
-        public Thread newThread(Runnable r)
-        {
-            Runnable r2 = () ->
-            {
-                if (contextMap != null)
-                    MDC.setContextMap(contextMap);
-                r.run();
-            };
-            final Thread t = new Thread(AudioManagerImpl.AUDIO_THREADS, r2, identifier + " - Thread " + threadCount.getAndIncrement());
-            t.setDaemon(true);
-            return t;
-        }
-    }
 }
-

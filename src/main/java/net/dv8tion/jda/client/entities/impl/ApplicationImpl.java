@@ -18,7 +18,6 @@ package net.dv8tion.jda.client.entities.impl;
 
 import net.dv8tion.jda.client.entities.Application;
 import net.dv8tion.jda.client.managers.ApplicationManager;
-import net.dv8tion.jda.client.managers.ApplicationManagerUpdatable;
 import net.dv8tion.jda.core.JDA;
 import net.dv8tion.jda.core.Permission;
 import net.dv8tion.jda.core.requests.Request;
@@ -32,11 +31,9 @@ import java.util.*;
 
 public class ApplicationImpl implements Application
 {
-
     private final JDA api;
     private final Object mngLock = new Object();
     private ApplicationManager manager;
-    private ApplicationManagerUpdatable managerUpdatable;
 
     private BotImpl bot;
     private String description;
@@ -132,7 +129,7 @@ public class ApplicationImpl implements Application
     public String getIconUrl()
     {
         return this.iconId == null ? null
-                : "https://cdn.discordapp.com/app-icons/" + this.id + '/' + this.iconId + ".jpg";
+                : "https://cdn.discordapp.com/app-icons/" + this.id + '/' + this.iconId + ".png";
     }
 
     @Override
@@ -163,22 +160,6 @@ public class ApplicationImpl implements Application
         return mng;
     }
 
-    @Override
-    public ApplicationManagerUpdatable getManagerUpdatable()
-    {
-        ApplicationManagerUpdatable mng = managerUpdatable;
-        if (mng == null)
-        {
-            synchronized (mngLock)
-            {
-                mng = managerUpdatable;
-                if (mng == null)
-                    mng = managerUpdatable = new ApplicationManagerUpdatable(this);
-            }
-        }
-        return mng;
-    }
-    
     @Override
     public String getName()
     {
@@ -313,7 +294,7 @@ public class ApplicationImpl implements Application
         public String getAvatarUrl()
         {
             return this.avatarId == null ? null
-                    : "https://cdn.discordapp.com/avatars/" + this.id + "/" + this.avatarId + ".jpg";
+                    : "https://cdn.discordapp.com/avatars/" + this.id + "/" + this.avatarId + ".png";
         }
 
         @Override

@@ -17,12 +17,16 @@
 package net.dv8tion.jda.core.entities;
 
 import net.dv8tion.jda.core.JDA;
+import net.dv8tion.jda.core.entities.Guild.VerificationLevel;
 import net.dv8tion.jda.core.entities.impl.InviteImpl;
 import net.dv8tion.jda.core.requests.RestAction;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
 
 import javax.annotation.CheckReturnValue;
+import javax.annotation.Nullable;
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Representation of a Discord Invite.
@@ -53,7 +57,32 @@ public interface Invite
      */
     static RestAction<Invite> resolve(final JDA api, final String code)
     {
-        return InviteImpl.resolve(api, code);
+        return resolve(api, code, false);
+    }
+    
+    /**
+     * Retrieves a new {@link net.dv8tion.jda.core.entities.Invite Invite} instance for the given invite code.
+     * <br><b>You cannot resolve invites if you were banned from the origin Guild!</b>
+     *
+     * <p>Possible {@link net.dv8tion.jda.core.requests.ErrorResponse ErrorResponses} include:
+     * <ul>
+     *     <li>{@link net.dv8tion.jda.core.requests.ErrorResponse#UNKNOWN_INVITE Unknown Invite}
+     *     <br>The Invite did not exist (possibly deleted) or the account is banned in the guild.</li>
+     * </ul>
+     *
+     * @param  api
+     *         The JDA instance
+     * @param  code
+     *         A valid invite code
+     * @param  withCounts
+     *         Whether or not to include online and member counts for guild invites or users for group invites
+     *
+     * @return {@link net.dv8tion.jda.core.requests.RestAction RestAction} - Type: {@link net.dv8tion.jda.core.entities.Invite Invite}
+     *         <br>The Invite object
+     */
+    static RestAction<Invite> resolve(final JDA api, final String code, final boolean withCounts)
+    {
+        return InviteImpl.resolve(api, code, withCounts);
     }
 
     /**
@@ -71,6 +100,8 @@ public interface Invite
 
     /**
      * Tries to retrieve a new expanded {@link net.dv8tion.jda.core.entities.Invite Invite} with more info.
+     * <br>As bots can't be in groups this is only available for guild invites and will throw an {@link java.lang.IllegalStateException IllegalStateException}
+     * for other types.
      * <br>Requires either {@link net.dv8tion.jda.core.Permission#MANAGE_SERVER MANAGE_SERVER} in the invite's guild or
      * {@link net.dv8tion.jda.core.Permission#MANAGE_CHANNEL MANAGE_CHANNEL} in the invite's channel.
      * Will throw a {@link net.dv8tion.jda.core.exceptions.InsufficientPermissionException InsufficientPermissionException} otherwise.
@@ -78,20 +109,30 @@ public interface Invite
      * @throws net.dv8tion.jda.core.exceptions.InsufficientPermissionException
      *         if the account neither has {@link net.dv8tion.jda.core.Permission#MANAGE_SERVER MANAGE_SERVER} in the invite's guild nor
      *         {@link net.dv8tion.jda.core.Permission#MANAGE_CHANNEL MANAGE_CHANNEL} in the invite's channel
+     * @throws java.lang.IllegalStateException
+     *         If this is a group invite
      *
      * @return {@link net.dv8tion.jda.core.requests.RestAction RestAction} - Type: {@link net.dv8tion.jda.core.entities.Invite Invite}
      *         <br>The expanded Invite object
      *
+     * @see    #getType()
      * @see    #isExpanded()
      */
     @CheckReturnValue
     RestAction<Invite> expand();
 
     /**
+     * The type of this invite.
+     *
+     * @return The invites's type
+     */
+    Invite.InviteType getType();
+
+    /**
      * An {@link net.dv8tion.jda.core.entities.Invite.Channel Invite.Channel} object
      * containing information about this invite's origin channel.
      *
-     * @return Information about this invite's origin channel
+     * @return Information about this invite's origin channel or null in case of a group invite
      * 
      * @see    net.dv8tion.jda.core.entities.Invite.Channel
      */
@@ -103,6 +144,16 @@ public interface Invite
      * @return the invite code
      */
     String getCode();
+
+    /**
+     * An {@link net.dv8tion.jda.core.entities.Invite.Group Invite.Group} object
+     * containing information about this invite's origin group.
+     *
+     * @return Information about this invite's origin group or null in case of a guild invite
+     *
+     * @see    net.dv8tion.jda.core.entities.Invite.Group
+     */
+    Group getGroup();
 
     /**
      * The invite URL for this invite in the format of:
@@ -134,7 +185,7 @@ public interface Invite
      * An {@link net.dv8tion.jda.core.entities.Invite.Guild Invite.Guild} object
      * containing information about this invite's origin guild.
      *
-     * @return Information about this invite's origin guild
+     * @return Information about this invite's origin guild or null in case of a group invite
      * 
      * @see    net.dv8tion.jda.core.entities.Invite.Guild
      */
@@ -296,5 +347,104 @@ public interface Invite
          * @see    #getSplashId()
          */
         String getSplashUrl();
+        
+        /**
+         * Returns the {@link net.dv8tion.jda.core.entities.Guild.VerificationLevel VerificationLevel} of this guild.
+         * 
+         * @return the verification level of the guild
+         */
+        VerificationLevel getVerificationLevel();
+        
+        /**
+         * Returns the approximate count of online members in the guild. If the online member count was not included in the
+         * invite, this will return -1. Counts will usually only be returned when resolving the invite via the 
+         * {@link #resolve(net.dv8tion.jda.core.JDA, java.lang.String, boolean) Invite.resolve()} method with the 
+         * withCounts boolean set to {@code true}
+         * 
+         * @return the approximate count of online members in the guild, or -1 if not present in the invite
+         */
+        int getOnlineCount();
+        
+        /**
+         * Returns the approximate count of total members in the guild. If the total member count was not included in the
+         * invite, this will return -1. Counts will usually only be returned when resolving the invite via the 
+         * {@link #resolve(net.dv8tion.jda.core.JDA, java.lang.String, boolean) Invite.resolve()} method with the 
+         * withCounts boolean set to {@code true}
+         * 
+         * @return the approximate count of total members in the guild, or -1 if not present in the invite
+         */
+        int getMemberCount();
+
+        /**
+         * The Features of the {@link net.dv8tion.jda.core.entities.Invite.Guild Guild}.
+         * <p>
+         * <b>Possible known features:</b>
+         * <ul>
+         *     <li>VIP_REGIONS - Guild has VIP voice regions</li>
+         *     <li>VANITY_URL - Guild a vanity URL (custom invite link)</li>
+         *     <li>INVITE_SPLASH - Guild has custom invite splash. See {@link #getSplashId()} and {@link #getSplashUrl()}</li>
+         *     <li>VERIFIED - Guild is "verified"</li>
+         *     <li>MORE_EMOJI - Guild is able to use more than 50 emoji</li>
+         * </ul>
+         *
+         * @return Never-null, unmodifiable Set containing all of the Guild's features.
+         */
+        Set<String> getFeatures();
+    }
+
+    /**
+     * POJO for the group information provided by an invite.
+     *
+     * @see #getChannel()
+     */
+    interface Group extends ISnowflake
+    {
+        /**
+         * The icon id of this group or {@code null} if the group has no icon.
+         *
+         * @return The group's icon id
+         *
+         * @see    #getIconUrl()
+         */
+        String getIconId();
+
+        /**
+         * The icon url of this group or {@code null} if the group has no icon.
+         *
+         * @return The group's icon url
+         *
+         * @see    #getIconId()
+         */
+        String getIconUrl();
+
+        /**
+         * The name of this group or {@code null} if the group has no name.
+         *
+         * @return The group's name
+         */
+        String getName();
+
+        /**
+         * The names of all users in this group. If the users were not included in the
+         * invite, this will return {@code null}. Users will only be returned when resolving the invite via the
+         * {@link #resolve(net.dv8tion.jda.core.JDA, java.lang.String, boolean) Invite.resolve()} method with the
+         * {@code withCounts} boolean set to {@code true}.
+         *
+         * @return The names of the groups's users or null if not preset in the invite
+         */
+        @Nullable
+        List<String> getUsers();
+    }
+
+    /**
+     * Enum representing the type of an invite.
+     *
+     * @see #getType()
+     */
+    enum InviteType
+    {
+        GUILD,
+        GROUP,
+        UNKNOWN
     }
 }

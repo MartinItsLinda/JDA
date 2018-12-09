@@ -15,13 +15,13 @@
  */
 package net.dv8tion.jda.core.handle;
 
+import net.dv8tion.jda.core.entities.Role;
 import net.dv8tion.jda.core.entities.impl.GuildImpl;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.entities.impl.RoleImpl;
 import net.dv8tion.jda.core.events.role.update.*;
 import org.json.JSONObject;
 
-import java.awt.Color;
 import java.util.Objects;
 
 public class GuildRoleUpdateHandler extends SocketHandler
@@ -35,15 +35,14 @@ public class GuildRoleUpdateHandler extends SocketHandler
     protected Long handleInternally(JSONObject content)
     {
         final long guildId = content.getLong("guild_id");
-        if (api.getGuildLock().isLocked(guildId))
+        if (getJDA().getGuildSetupController().isLocked(guildId))
             return guildId;
 
         JSONObject rolejson = content.getJSONObject("role");
-        GuildImpl guild = (GuildImpl) api.getGuildMap().get(guildId);
+        GuildImpl guild = (GuildImpl) getJDA().getGuildMap().get(guildId);
         if (guild == null)
         {
-            api.getEventCache().cache(EventCache.Type.GUILD, guildId, () ->
-                    handle(responseNumber, allContent));
+            getJDA().getEventCache().cache(EventCache.Type.GUILD, guildId, responseNumber, allContent, this::handle);
             EventCache.LOG.debug("Received a Role Update for a Guild that is not yet cached: {}", content);
             return null;
         }
@@ -52,13 +51,15 @@ public class GuildRoleUpdateHandler extends SocketHandler
         RoleImpl role = (RoleImpl) guild.getRolesMap().get(roleId);
         if (role == null)
         {
-            api.getEventCache().cache(EventCache.Type.ROLE, roleId, () -> handle(responseNumber, allContent));
+            getJDA().getEventCache().cache(EventCache.Type.ROLE, roleId, responseNumber, allContent, this::handle);
             EventCache.LOG.debug("Received a Role Update for Role that is not yet cached: {}", content);
             return null;
         }
 
         String name = rolejson.getString("name");
-        Color color = rolejson.getInt("color") != 0 ? new Color(rolejson.getInt("color")) : null;
+        int color = rolejson.getInt("color");
+        if (color == 0)
+            color = Role.DEFAULT_COLOR_RAW;
         int position = rolejson.getInt("position");
         long permissions = rolejson.getLong("permissions");
         boolean hoisted = rolejson.getBoolean("hoist");
@@ -68,18 +69,18 @@ public class GuildRoleUpdateHandler extends SocketHandler
         {
             String oldName = role.getName();
             role.setName(name);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdateNameEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, oldName));
         }
-        if (!Objects.equals(color, role.getColor()))
+        if (color != role.getColorRaw())
         {
-            Color oldColor = role.getColor();
+            int oldColor = role.getColorRaw();
             role.setColor(color);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdateColorEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, oldColor));
         }
         if (!Objects.equals(position, role.getPositionRaw()))
@@ -87,18 +88,18 @@ public class GuildRoleUpdateHandler extends SocketHandler
             int oldPosition = role.getPosition();
             int oldPositionRaw = role.getPositionRaw();
             role.setRawPosition(position);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdatePositionEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, oldPosition, oldPositionRaw));
         }
         if (!Objects.equals(permissions, role.getPermissionsRaw()))
         {
             long oldPermissionsRaw = role.getPermissionsRaw();
             role.setRawPermissions(permissions);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdatePermissionsEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, oldPermissionsRaw));
         }
 
@@ -106,18 +107,18 @@ public class GuildRoleUpdateHandler extends SocketHandler
         {
             boolean wasHoisted = role.isHoisted();
             role.setHoisted(hoisted);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdateHoistedEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, wasHoisted));
         }
         if (mentionable != role.isMentionable())
         {
             boolean wasMentionable = role.isMentionable();
             role.setMentionable(mentionable);
-            api.getEventManager().handle(
+            getJDA().getEventManager().handle(
                     new RoleUpdateMentionableEvent(
-                            api, responseNumber,
+                            getJDA(), responseNumber,
                             role, wasMentionable));
         }
         return null;

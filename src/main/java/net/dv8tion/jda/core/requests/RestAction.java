@@ -17,12 +17,14 @@
 package net.dv8tion.jda.core.requests;
 
 import net.dv8tion.jda.core.JDA;
+import net.dv8tion.jda.core.audit.ThreadLocalReason;
 import net.dv8tion.jda.core.entities.impl.JDAImpl;
 import net.dv8tion.jda.core.exceptions.ErrorResponseException;
 import net.dv8tion.jda.core.exceptions.PermissionException;
 import net.dv8tion.jda.core.exceptions.RateLimitedException;
 import net.dv8tion.jda.core.utils.Checks;
 import net.dv8tion.jda.core.utils.JDALogger;
+import net.dv8tion.jda.core.utils.cache.UpstreamReference;
 import okhttp3.RequestBody;
 import org.apache.commons.collections4.map.CaseInsensitiveMap;
 import org.json.JSONArray;
@@ -157,6 +159,10 @@ public abstract class RestAction<T>
         {
             LOG.error("RestAction queue returned failure", t);
         }
+        else if (t.getCause() != null)
+        {
+            LOG.error("RestAction queue returned failure: [{}] {}", t.getClass().getSimpleName(), t.getMessage(), t.getCause());
+        }
         else
         {
             LOG.error("RestAction queue returned failure: [{}] {}", t.getClass().getSimpleName(), t.getMessage());
@@ -167,7 +173,7 @@ public abstract class RestAction<T>
 
     protected static boolean passContext = false;
 
-    protected final JDAImpl api;
+    protected final UpstreamReference<JDAImpl> api;
 
     private final Route.CompiledRoute route;
     private final RequestBody data;
@@ -234,7 +240,7 @@ public abstract class RestAction<T>
     {
         Checks.notNull(api, "api");
 
-        this.api = (JDAImpl) api;
+        this.api = new UpstreamReference<>((JDAImpl) api);
         this.route = route;
         this.data = data;
     }
@@ -264,7 +270,7 @@ public abstract class RestAction<T>
      */
     public JDA getJDA()
     {
-        return api;
+        return api.get();
     }
 
     /**
@@ -306,7 +312,7 @@ public abstract class RestAction<T>
      *         The success callback that will be called at a convenient time
      *         for the API. (can be null)
      */
-    public void queue(Consumer<T> success)
+    public void queue(Consumer<? super T> success)
     {
         queue(success, null);
     }
@@ -323,7 +329,8 @@ public abstract class RestAction<T>
      *         The failure callback that will be called if the Request
      *         encounters an exception at its execution point.
      */
-    public void queue(Consumer<T> success, Consumer<Throwable> failure)
+    @SuppressWarnings("unchecked")
+    public void queue(Consumer<? super T> success, Consumer<? super Throwable> failure)
     {
         Route.CompiledRoute route = finalizeRoute();
         Checks.notNull(route, "Route");
@@ -334,7 +341,7 @@ public abstract class RestAction<T>
             success = DEFAULT_SUCCESS == null ? FALLBACK_CONSUMER : DEFAULT_SUCCESS;
         if (failure == null)
             failure = DEFAULT_FAILURE == null ? FALLBACK_CONSUMER : DEFAULT_FAILURE;
-        api.getRequester().request(new Request<>(this, success, failure, finisher, true, data, rawData, route, headers));
+        api.get().getRequester().request(new Request<>(this, success, failure, finisher, true, data, rawData, route, headers));
     }
 
     /**
@@ -380,6 +387,9 @@ public abstract class RestAction<T>
      *
      * <p><b>This might throw {@link java.lang.RuntimeException RuntimeExceptions}</b>
      *
+     * @throws IllegalStateException
+     *         If used within a {@link #queue(Consumer, Consumer) queue(...)} callback
+     *
      * @return The response value
      */
     public T complete()
@@ -388,12 +398,12 @@ public abstract class RestAction<T>
         {
             return complete(true);
         }
-        catch (RateLimitedException ignored)
+        catch (RateLimitedException e)
         {
             //This is so beyond impossible, but on the off chance that the laws of nature are rewritten
             // after the writing of this code, I'm placing this here.
             //Better safe than sorry?
-            throw new AssertionError(ignored);
+            throw new AssertionError(e);
         }
     }
 
@@ -405,6 +415,8 @@ public abstract class RestAction<T>
      * @param  shouldQueue
      *         Whether this should automatically handle rate limitations (default true)
      *
+     * @throws IllegalStateException
+     *         If used within a {@link #queue(Consumer, Consumer) queue(...)} callback
      * @throws RateLimitedException
      *         If we were rate limited and the {@code shouldQueue} is false.
      *         Use {@link #complete()} to avoid this Exception.
@@ -413,6 +425,8 @@ public abstract class RestAction<T>
      */
     public T complete(boolean shouldQueue) throws RateLimitedException
     {
+        if (CallbackContext.isCallbackContext())
+            throw new IllegalStateException("Preventing use of complete() in callback threads! This operation can be a deadlock cause");
         try
         {
             return submit(shouldQueue).get();
@@ -459,7 +473,7 @@ public abstract class RestAction<T>
      */
     public ScheduledFuture<T> submitAfter(long delay, TimeUnit unit)
     {
-        return submitAfter(delay, unit, api.pool);
+        return submitAfter(delay, unit, api.get().getRateLimitPool());
     }
 
     /**
@@ -490,7 +504,7 @@ public abstract class RestAction<T>
     {
         Checks.notNull(executor, "Scheduler");
         Checks.notNull(unit, "TimeUnit");
-        return executor.schedule((Callable<T>) this::complete, delay, unit);
+        return executor.schedule((Callable<T>) new ContextRunnable((Callable<T>) this::complete), delay, unit);
     }
 
     /**
@@ -551,7 +565,7 @@ public abstract class RestAction<T>
      */
     public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit)
     {
-        return queueAfter(delay, unit, api.pool);
+        return queueAfter(delay, unit, api.get().getRateLimitPool());
     }
 
     /**
@@ -581,9 +595,9 @@ public abstract class RestAction<T>
      * @return {@link java.util.concurrent.ScheduledFuture ScheduledFuture}
      *         representing the delayed operation
      */
-    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<T> success)
+    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<? super T> success)
     {
-        return queueAfter(delay, unit, success, api.pool);
+        return queueAfter(delay, unit, success, api.get().getRateLimitPool());
     }
 
     /**
@@ -614,9 +628,9 @@ public abstract class RestAction<T>
      * @return {@link java.util.concurrent.ScheduledFuture ScheduledFuture}
      *         representing the delayed operation
      */
-    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<T> success, Consumer<Throwable> failure)
+    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<? super T> success, Consumer<? super Throwable> failure)
     {
-        return queueAfter(delay, unit, success, failure, api.pool);
+        return queueAfter(delay, unit, success, failure, api.get().getRateLimitPool());
     }
 
     /**
@@ -677,7 +691,7 @@ public abstract class RestAction<T>
      * @return {@link java.util.concurrent.ScheduledFuture ScheduledFuture}
      *         representing the delayed operation
      */
-    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<T> success, ScheduledExecutorService executor)
+    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<? super T> success, ScheduledExecutorService executor)
     {
         return queueAfter(delay, unit, success, null, executor);
     }
@@ -710,11 +724,11 @@ public abstract class RestAction<T>
      * @return {@link java.util.concurrent.ScheduledFuture ScheduledFuture}
      *         representing the delayed operation
      */
-    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<T> success, Consumer<Throwable> failure, ScheduledExecutorService executor)
+    public ScheduledFuture<?> queueAfter(long delay, TimeUnit unit, Consumer<? super T> success, Consumer<? super Throwable> failure, ScheduledExecutorService executor)
     {
         Checks.notNull(executor, "Scheduler");
         Checks.notNull(unit, "TimeUnit");
-        return executor.schedule(() -> queue(success, failure), delay, unit);
+        return executor.schedule((Runnable) new ContextRunnable(() -> queue(success, failure)), delay, unit);
     }
 
     protected RequestBody finalizeData() { return data; }
@@ -764,7 +778,7 @@ public abstract class RestAction<T>
         }
 
         @Override
-        public void queue(Consumer<T> success, Consumer<Throwable> failure)
+        public void queue(Consumer<? super T> success, Consumer<? super Throwable> failure)
         {
             if (success != null)
                 success.accept(returnObj);
@@ -826,6 +840,45 @@ public abstract class RestAction<T>
         public boolean getAsBoolean()
         {
             return pre() && test();
+        }
+    }
+
+    private class ContextRunnable implements Runnable, Callable<T>
+    {
+        private final String localReason;
+        private final Runnable runnable;
+        private final Callable<T> callable;
+
+        protected ContextRunnable(Runnable runnable)
+        {
+            this.localReason = ThreadLocalReason.getCurrent();
+            this.runnable = runnable;
+            this.callable = null;
+        }
+
+        protected ContextRunnable(Callable<T> callable)
+        {
+            this.localReason = ThreadLocalReason.getCurrent();
+            this.runnable = null;
+            this.callable = callable;
+        }
+
+        @Override
+        public void run()
+        {
+            try (ThreadLocalReason.Closable __ = ThreadLocalReason.closable(localReason))
+            {
+                runnable.run();
+            }
+        }
+
+        @Override
+        public T call() throws Exception
+        {
+            try (ThreadLocalReason.Closable __ = ThreadLocalReason.closable(localReason))
+            {
+                return callable.call();
+            }
         }
     }
 }

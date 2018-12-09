@@ -38,7 +38,6 @@ import java.util.function.BooleanSupplier;
  * This extension allows setting properties before executing the action.
  *
  * @since  3.0
- * @author Florian Spieß
  */
 public class ChannelAction extends AuditableRestAction<Channel>
 {
@@ -51,6 +50,7 @@ public class ChannelAction extends AuditableRestAction<Channel>
     // --text only--
     protected String topic = null;
     protected Boolean nsfw = null;
+    protected Integer slowmode = null;
 
     // --voice only--
     protected Integer bitrate = null;
@@ -87,10 +87,10 @@ public class ChannelAction extends AuditableRestAction<Channel>
      * Sets the name for the new Channel
      *
      * @param  name
-     *         The not-null name for the new Channel (2-100 chars long)
+     *         The not-null name for the new Channel (1-100 chars long)
      *
      * @throws java.lang.IllegalArgumentException
-     *         If the provided name is null or not between 2-100 chars long
+     *         If the provided name is null or not between 1-100 chars long
      *
      * @return The current ChannelAction, for chaining convenience
      */
@@ -98,8 +98,8 @@ public class ChannelAction extends AuditableRestAction<Channel>
     public ChannelAction setName(String name)
     {
         Checks.notNull(name, "Channel name");
-        if (name.length() < 2 || name.length() > 100)
-            throw new IllegalArgumentException("Provided channel name must be 2 to 100 characters in length");
+        if (name.length() < 1 || name.length() > 100)
+            throw new IllegalArgumentException("Provided channel name must be 1 to 100 characters in length");
 
         this.name = name;
         return this;
@@ -172,8 +172,43 @@ public class ChannelAction extends AuditableRestAction<Channel>
     }
 
     /**
-     * Adds a new Role-{@link net.dv8tion.jda.core.entities.PermissionOverride PermissionOverride}
+     * Sets the slowmode value, which limits the amount of time that individual users must wait
+     * between sending messages in the new TextChannel. This is measured in seconds.
+     *
+     * <p>Note that only {@link net.dv8tion.jda.core.AccountType#CLIENT CLIENT} type accounts are
+     * affected by slowmode, and that {@link net.dv8tion.jda.core.AccountType#BOT BOT} accounts
+     * are immune to the restrictions.
+     * <br>Having {@link net.dv8tion.jda.core.Permission#MESSAGE_MANAGE MESSAGE_MANAGE} or
+     * {@link net.dv8tion.jda.core.Permission#MANAGE_CHANNEL MANAGE_CHANNEL} permission also
+     * grants immunity to slowmode.
+     *
+     * @param  slowmode
+     *         The number of seconds required to wait between sending messages in the channel.
+     *
+     * @throws IllegalArgumentException
+     *         If the {@code slowmode} is greater than 120, or less than 0
+     *
+     * @return The current ChannelAction, for chaining convenience
+     */
+    @CheckReturnValue
+    public ChannelAction setSlowmode(int slowmode)
+    {
+        Checks.check(slowmode <= 120 && slowmode >= 0, "Slowmode must be between 0 and 120 (seconds)!");
+        this.slowmode = slowmode;
+        return this;
+    }
+
+    /**
+     * Adds a new Role or Member {@link net.dv8tion.jda.core.entities.PermissionOverride PermissionOverride}
      * for the new Channel.
+     *
+     * <p>Example:
+     * <pre>{@code
+     * Role role = guild.getPublicRole();
+     * EnumSet<Permission> allow = EnumSet.of(Permission.MESSAGE_READ);
+     * EnumSet<Permission> deny = EnumSet.of(Permission.MESSAGE_WRITE);
+     * channelAction.addPermissionOverride(role, allow, deny);
+     * }</pre>
      *
      * @param  target
      *         The not-null {@link net.dv8tion.jda.core.entities.Role Role} or {@link net.dv8tion.jda.core.entities.Member Member} for the override
@@ -183,10 +218,11 @@ public class ChannelAction extends AuditableRestAction<Channel>
      *         The denied {@link net.dv8tion.jda.core.Permission Permissions} for the override or null
      *
      * @throws java.lang.IllegalArgumentException
-     *         If the specified {@link net.dv8tion.jda.core.entities.Role Role} is null
-     *         or not within the same guild.
+     *         If the specified target is null or not within the same guild.
      *
      * @return The current ChannelAction, for chaining convenience
+     *
+     * @see    java.util.EnumSet
      */
     @CheckReturnValue
     public ChannelAction addPermissionOverride(IPermissionHolder target, Collection<Permission> allow, Collection<Permission> deny)
@@ -200,11 +236,19 @@ public class ChannelAction extends AuditableRestAction<Channel>
     }
 
     /**
-     * Adds a new Role-{@link net.dv8tion.jda.core.entities.PermissionOverride PermissionOverride}
+     * Adds a new Role or Member {@link net.dv8tion.jda.core.entities.PermissionOverride PermissionOverride}
      * for the new Channel.
      *
+     * <p>Example:
+     * <pre>{@code
+     * Role role = guild.getPublicRole();
+     * long allow = Permission.MESSAGE_READ.getRawValue();
+     * long deny = Permission.MESSAGE_WRITE.getRawValue() | Permission.MESSAGE_ADD_REACTION.getRawValue();
+     * channelAction.addPermissionOverride(role, allow, deny);
+     * }</pre>
+     *
      * @param  target
-     *         The not-null {@link net.dv8tion.jda.core.entities.Role Role} for the override
+     *         The not-null {@link net.dv8tion.jda.core.entities.Role Role} or {@link net.dv8tion.jda.core.entities.Member Member} for the override
      * @param  allow
      *         The granted {@link net.dv8tion.jda.core.Permission Permissions} for the override
      *         Use {@link net.dv8tion.jda.core.Permission#getRawValue()} to retrieve these Permissions.
@@ -214,7 +258,7 @@ public class ChannelAction extends AuditableRestAction<Channel>
      *
      * @throws java.lang.IllegalArgumentException
      *         <ul>
-     *             <li>If the specified {@link net.dv8tion.jda.core.entities.Role Role} is null
+     *             <li>If the specified target is null
      *                 or not within the same guild.</li>
      *             <li>If one of the provided Permission values is invalid</li>
      *         </ul>
@@ -327,6 +371,8 @@ public class ChannelAction extends AuditableRestAction<Channel>
                     object.put("topic", topic);
                 if (nsfw != null)
                     object.put("nsfw", nsfw);
+                if (slowmode != null)
+                    object.put("rate_limit_per_user", slowmode);
         }
         if (type != ChannelType.CATEGORY && parent != null)
             object.put("parent_id", parent.getId());
@@ -343,7 +389,7 @@ public class ChannelAction extends AuditableRestAction<Channel>
             return;
         }
 
-        EntityBuilder builder = api.getEntityBuilder();;
+        EntityBuilder builder = api.get().getEntityBuilder();
         Channel channel;
         switch (type)
         {
@@ -361,14 +407,6 @@ public class ChannelAction extends AuditableRestAction<Channel>
                 return;
         }
         request.onSuccess(channel);
-    }
-
-    protected void checkPermissions(Permission... permissions)
-    {
-        if (permissions == null)
-            return;
-        for (Permission p : permissions)
-            Checks.notNull(p, "Permissions");
     }
 
     protected void checkPermissions(Collection<Permission> permissions)

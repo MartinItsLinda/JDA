@@ -17,19 +17,17 @@
 package net.dv8tion.jda.core.requests.restaction.pagination;
 
 import net.dv8tion.jda.core.JDA;
-import net.dv8tion.jda.core.requests.Request;
-import net.dv8tion.jda.core.requests.Response;
-import net.dv8tion.jda.core.requests.RestAction;
-import net.dv8tion.jda.core.requests.Route;
+import net.dv8tion.jda.core.requests.*;
 import net.dv8tion.jda.core.utils.Checks;
 import net.dv8tion.jda.core.utils.Procedure;
+import net.dv8tion.jda.core.utils.Promise;
 
 import javax.annotation.Nonnull;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -81,7 +79,6 @@ import java.util.stream.StreamSupport;
  *         The type of entity to paginate
  *
  * @since  3.1
- * @author Florian Spieß
  */
 public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
     extends RestAction<List<T>> implements Iterable<T>
@@ -133,6 +130,7 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public M setCheck(BooleanSupplier checks)
     {
         return (M) super.setCheck(checks);
@@ -227,6 +225,7 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return The current PaginationAction implementation instance
      */
+    @SuppressWarnings("unchecked")
     public M limit(final int limit)
     {
         Checks.check(maxLimit == 0 || limit <= maxLimit, "Limit must not exceed %d!", maxLimit);
@@ -253,6 +252,7 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return The current PaginationAction implementation instance
      */
+    @SuppressWarnings("unchecked")
     public M cache(final boolean enableCache)
     {
         this.useCache = enableCache;
@@ -316,6 +316,53 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
     }
 
     /**
+     * Convenience method to retrieve an amount of entities from this pagination action.
+     * <br>This also includes already cached entities similar to {@link #forEachAsync(Procedure)}.
+     *
+     * @param  amount
+     *         The maximum amount to retrieve
+     *
+     * @return {@link net.dv8tion.jda.core.requests.RequestFuture RequestFuture} - Type: {@link java.util.List List}
+     *
+     * @see    #forEachAsync(Procedure)
+     */
+    public RequestFuture<List<T>> takeAsync(int amount)
+    {
+        return takeAsync0(amount, (task, list) -> forEachAsync(val -> {
+            list.add(val);
+            return list.size() < amount;
+        }, task::completeExceptionally));
+    }
+
+    /**
+     * Convenience method to retrieve an amount of entities from this pagination action.
+     * <br>Unlike {@link #takeAsync(int)} this does not include already cached entities.
+     *
+     * @param  amount
+     *         The maximum amount to retrieve
+     *
+     * @return {@link net.dv8tion.jda.core.requests.RequestFuture RequestFuture} - Type: {@link java.util.List List}
+     *
+     * @see    #forEachRemainingAsync(Procedure)
+     */
+    public RequestFuture<List<T>> takeRemainingAsync(int amount)
+    {
+        return takeAsync0(amount, (task, list) -> forEachRemainingAsync(val -> {
+            list.add(val);
+            return list.size() < amount;
+        }, task::completeExceptionally));
+    }
+
+    private RequestFuture<List<T>> takeAsync0(int amount, BiFunction<Promise<?>, List<T>, RequestFuture<?>> converter)
+    {
+        Promise<List<T>> task = new Promise<>();
+        List<T> list = new ArrayList<>(amount);
+        RequestFuture<?> promise = converter.apply(task, list);
+        promise.thenRun(() -> task.complete(list));
+        return task;
+    }
+
+    /**
      * {@link net.dv8tion.jda.core.requests.restaction.pagination.PaginationAction.PaginationIterator PaginationIterator}
      * that will iterate over all entities for this PaginationAction.
      *
@@ -362,7 +409,7 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return {@link java.util.concurrent.Future Future} that can be cancelled to stop iteration from outside!
      */
-    public Future<?> forEachAsync(final Procedure<T> action)
+    public RequestFuture<?> forEachAsync(final Procedure<T> action)
     {
         return forEachAsync(action, (throwable) ->
         {
@@ -408,12 +455,12 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return {@link java.util.concurrent.Future Future} that can be cancelled to stop iteration from outside!
      */
-    public Future<?> forEachAsync(final Procedure<T> action, final Consumer<Throwable> failure)
+    public RequestFuture<?> forEachAsync(final Procedure<T> action, final Consumer<Throwable> failure)
     {
         Checks.notNull(action, "Procedure");
         Checks.notNull(failure, "Failure Consumer");
 
-        final CompletableFuture<?> task = new CompletableFuture<>();
+        final Promise<?> task = new Promise<>();
         final Consumer<List<T>> acceptor = new ChainedConsumer(task, action, (throwable) ->
         {
             task.completeExceptionally(throwable);
@@ -466,7 +513,7 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return {@link java.util.concurrent.Future Future} that can be cancelled to stop iteration from outside!
      */
-    public Future<?> forEachRemainingAsync(final Procedure<T> action)
+    public RequestFuture<?> forEachRemainingAsync(final Procedure<T> action)
     {
         return forEachRemainingAsync(action, (throwable) ->
         {
@@ -512,12 +559,12 @@ public abstract class PaginationAction<T, M extends PaginationAction<T, M>>
      *
      * @return {@link java.util.concurrent.Future Future} that can be cancelled to stop iteration from outside!
      */
-    public Future<?> forEachRemainingAsync(final Procedure<T> action, final Consumer<Throwable> failure)
+    public RequestFuture<?> forEachRemainingAsync(final Procedure<T> action, final Consumer<Throwable> failure)
     {
         Checks.notNull(action, "Procedure");
         Checks.notNull(failure, "Failure Consumer");
 
-        final CompletableFuture<?> task = new CompletableFuture<>();
+        final Promise<?> task = new Promise<>();
         final Consumer<List<T>> acceptor = new ChainedConsumer(task, action, (throwable) ->
         {
             task.completeExceptionally(throwable);

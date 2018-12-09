@@ -18,30 +18,37 @@ package net.dv8tion.jda.core.entities.impl;
 
 import com.neovisionaries.ws.client.WebSocketFactory;
 import gnu.trove.map.TLongObjectMap;
+import net.dv8tion.jda.annotations.DeprecatedSince;
+import net.dv8tion.jda.annotations.ReplaceWith;
 import net.dv8tion.jda.bot.entities.impl.JDABotImpl;
 import net.dv8tion.jda.client.entities.impl.JDAClientImpl;
 import net.dv8tion.jda.core.AccountType;
 import net.dv8tion.jda.core.JDA;
-import net.dv8tion.jda.core.audio.AudioWebSocket;
 import net.dv8tion.jda.core.audio.factory.DefaultSendFactory;
 import net.dv8tion.jda.core.audio.factory.IAudioSendFactory;
+import net.dv8tion.jda.core.audio.hooks.ConnectionStatus;
 import net.dv8tion.jda.core.entities.*;
 import net.dv8tion.jda.core.events.StatusChangeEvent;
 import net.dv8tion.jda.core.exceptions.AccountTypeException;
 import net.dv8tion.jda.core.exceptions.RateLimitedException;
 import net.dv8tion.jda.core.handle.EventCache;
+import net.dv8tion.jda.core.handle.GuildSetupController;
 import net.dv8tion.jda.core.hooks.IEventManager;
 import net.dv8tion.jda.core.hooks.InterfacedEventManager;
 import net.dv8tion.jda.core.managers.AudioManager;
 import net.dv8tion.jda.core.managers.Presence;
+import net.dv8tion.jda.core.managers.impl.AudioManagerImpl;
 import net.dv8tion.jda.core.managers.impl.PresenceImpl;
 import net.dv8tion.jda.core.requests.*;
 import net.dv8tion.jda.core.requests.restaction.GuildAction;
 import net.dv8tion.jda.core.utils.*;
+import net.dv8tion.jda.core.utils.cache.CacheFlag;
 import net.dv8tion.jda.core.utils.cache.CacheView;
 import net.dv8tion.jda.core.utils.cache.SnowflakeCacheView;
+import net.dv8tion.jda.core.utils.cache.UpstreamReference;
 import net.dv8tion.jda.core.utils.cache.impl.AbstractCacheView;
 import net.dv8tion.jda.core.utils.cache.impl.SnowflakeCacheViewImpl;
+import net.dv8tion.jda.core.utils.concurrent.CountingThreadFactory;
 import net.dv8tion.jda.core.utils.tuple.Pair;
 import okhttp3.OkHttpClient;
 import org.json.JSONObject;
@@ -57,22 +64,30 @@ public class JDAImpl implements JDA
 {
     public static final Logger LOG = JDALogger.getLog(JDA.class);
 
-    public final ScheduledThreadPoolExecutor pool;
+    protected final ScheduledExecutorService rateLimitPool;
+    protected final ScheduledExecutorService gatewayPool;
+    protected final ExecutorService callbackPool;
+    protected final boolean shutdownRateLimitPool;
+    protected final boolean shutdownGatewayPool;
+    protected final boolean shutdownCallbackPool;
 
-    protected final SnowflakeCacheViewImpl<User> userCache = new SnowflakeCacheViewImpl<>(User::getName);
-    protected final SnowflakeCacheViewImpl<Guild> guildCache = new SnowflakeCacheViewImpl<>(Guild::getName);
-    protected final SnowflakeCacheViewImpl<Category> categories = new SnowflakeCacheViewImpl<>(Channel::getName);
-    protected final SnowflakeCacheViewImpl<TextChannel> textChannelCache = new SnowflakeCacheViewImpl<>(Channel::getName);
-    protected final SnowflakeCacheViewImpl<VoiceChannel> voiceChannelCache = new SnowflakeCacheViewImpl<>(Channel::getName);
-    protected final SnowflakeCacheViewImpl<PrivateChannel> privateChannelCache = new SnowflakeCacheViewImpl<>(MessageChannel::getName);
+    protected final Object audioLifeCycleLock = new Object();
+    protected ScheduledThreadPoolExecutor audioLifeCyclePool;
+
+    protected final SnowflakeCacheViewImpl<User> userCache = new SnowflakeCacheViewImpl<>(User.class, User::getName);
+    protected final SnowflakeCacheViewImpl<Guild> guildCache = new SnowflakeCacheViewImpl<>(Guild.class, Guild::getName);
+    protected final SnowflakeCacheViewImpl<Category> categories = new SnowflakeCacheViewImpl<>(Category.class, Channel::getName);
+    protected final SnowflakeCacheViewImpl<TextChannel> textChannelCache = new SnowflakeCacheViewImpl<>(TextChannel.class, Channel::getName);
+    protected final SnowflakeCacheViewImpl<VoiceChannel> voiceChannelCache = new SnowflakeCacheViewImpl<>(VoiceChannel.class, Channel::getName);
+    protected final SnowflakeCacheViewImpl<PrivateChannel> privateChannelCache = new SnowflakeCacheViewImpl<>(PrivateChannel.class, MessageChannel::getName);
 
     protected final TLongObjectMap<User> fakeUsers = MiscUtil.newLongMap();
     protected final TLongObjectMap<PrivateChannel> fakePrivateChannels = MiscUtil.newLongMap();
 
-    protected final AbstractCacheView<AudioManager> audioManagers = new CacheView.SimpleCacheView<>(m -> m.getGuild().getName());
+    protected final AbstractCacheView<AudioManager> audioManagers = new CacheView.SimpleCacheView<>(AudioManager.class, m -> m.getGuild().getName());
 
     protected final ConcurrentMap<String, String> contextMap;
-    protected final OkHttpClient.Builder httpClientBuilder;
+    protected final OkHttpClient httpClient;
     protected final WebSocketFactory wsFactory;
     protected final AccountType accountType;
     protected final PresenceImpl presence;
@@ -82,16 +97,15 @@ public class JDAImpl implements JDA
     protected final Thread shutdownHook;
     protected final EntityBuilder entityBuilder = new EntityBuilder(this);
     protected final EventCache eventCache = new EventCache();
-    protected final GuildLock guildLock = new GuildLock(this);
-    protected final Object akapLock = new Object();
+    protected final EnumSet<CacheFlag> cacheFlags;
 
     protected final SessionController sessionController;
+    protected final GuildSetupController guildSetupController;
 
-    protected WebSocketClient client;
+    protected UpstreamReference<WebSocketClient> client;
     protected Requester requester;
     protected IEventManager eventManager = new InterfacedEventManager();
     protected IAudioSendFactory audioSendFactory = new DefaultSendFactory();
-    protected ScheduledThreadPoolExecutor audioKeepAlivePool;
     protected Status status = Status.INITIALIZING;
     protected SelfUser selfUser;
     protected ShardInfo shardInfo;
@@ -103,19 +117,29 @@ public class JDAImpl implements JDA
     protected String token;
     protected String gatewayUrl;
 
-    public JDAImpl(AccountType accountType, String token, SessionController controller, OkHttpClient.Builder httpClientBuilder, WebSocketFactory wsFactory,
-                   boolean autoReconnect, boolean audioEnabled, boolean useShutdownHook, boolean bulkDeleteSplittingEnabled, boolean retryOnTimeout, boolean enableMDC,
-                   int corePoolSize, int maxReconnectDelay, ConcurrentMap<String, String> contextMap)
+    public JDAImpl(
+        AccountType accountType, String token, SessionController controller, OkHttpClient httpClient, WebSocketFactory wsFactory,
+        ScheduledExecutorService rateLimitPool, ScheduledExecutorService gatewayPool, ExecutorService callbackPool,
+        boolean autoReconnect, boolean audioEnabled, boolean useShutdownHook,
+        boolean bulkDeleteSplittingEnabled, boolean retryOnTimeout, boolean enableMDC,
+        boolean shutdownRateLimitPool, boolean shutdownGatewayPool, boolean shutdownCallbackPool,
+        int poolSize, int maxReconnectDelay,
+        ConcurrentMap<String, String> contextMap, EnumSet<CacheFlag> cacheFlags)
     {
         this.accountType = accountType;
         this.setToken(token);
-        this.httpClientBuilder = httpClientBuilder;
+        this.httpClient = httpClient;
         this.wsFactory = wsFactory;
         this.autoReconnect = autoReconnect;
         this.audioEnabled = audioEnabled;
         this.shutdownHook = useShutdownHook ? new Thread(this::shutdown, "JDA Shutdown Hook") : null;
         this.bulkDeleteSplittingEnabled = bulkDeleteSplittingEnabled;
-        this.pool = new ScheduledThreadPoolExecutor(corePoolSize, new JDAThreadFactory());
+        this.rateLimitPool = rateLimitPool == null ? newScheduler(poolSize, "RateLimit") : rateLimitPool;
+        this.gatewayPool = gatewayPool == null ? newScheduler(1, "Gateway") : gatewayPool;
+        this.callbackPool = callbackPool == null ? ForkJoinPool.commonPool() : callbackPool;
+        this.shutdownRateLimitPool = shutdownRateLimitPool;
+        this.shutdownGatewayPool = shutdownGatewayPool;
+        this.shutdownCallbackPool = shutdownCallbackPool;
         this.maxReconnectDelay = maxReconnectDelay;
         this.sessionController = controller == null ? new SessionControllerAdapter() : controller;
         if (enableMDC)
@@ -129,6 +153,18 @@ public class JDAImpl implements JDA
 
         this.jdaClient = accountType == AccountType.CLIENT ? new JDAClientImpl(this) : null;
         this.jdaBot = accountType == AccountType.BOT ? new JDABotImpl(this) : null;
+        this.guildSetupController = new GuildSetupController(this);
+        this.cacheFlags = cacheFlags;
+    }
+
+    private ScheduledThreadPoolExecutor newScheduler(int coreSize, String baseName)
+    {
+        return new ScheduledThreadPoolExecutor(coreSize, new CountingThreadFactory(this::getIdentifierString, baseName));
+    }
+
+    public boolean isCacheFlagSet(CacheFlag flag)
+    {
+        return cacheFlags.contains(flag);
     }
 
     public SessionController getSessionController()
@@ -136,7 +172,20 @@ public class JDAImpl implements JDA
         return sessionController;
     }
 
-    public int login(String gatewayUrl, ShardInfo shardInfo) throws LoginException
+    @Deprecated
+    @DeprecatedSince("3.8.0")
+    @ReplaceWith("getGuildSetupController()")
+    public GuildLock getGuildLock()
+    {
+        return new GuildLock(this);
+    }
+
+    public GuildSetupController getGuildSetupController()
+    {
+        return guildSetupController;
+    }
+
+    public int login(String gatewayUrl, ShardInfo shardInfo, boolean compression, boolean validateToken) throws LoginException
     {
         this.gatewayUrl = gatewayUrl;
         this.shardInfo = shardInfo;
@@ -157,11 +206,15 @@ public class JDAImpl implements JDA
             // set MDC metadata for build thread
             previousContext = MDC.getCopyOfContextMap();
             contextMap.forEach(MDC::put);
+            requester.setContextReady(true);
         }
-        verifyToken();
-        LOG.info("Login Successful!");
+        if (validateToken)
+        {
+            verifyToken();
+            LOG.info("Login Successful!");
+        }
 
-        client = new WebSocketClient(this);
+        client = new UpstreamReference<>(new WebSocketClient(this, compression));
         // remove our MDC metadata when we exit our code
         if (previousContext != null)
             previousContext.forEach(MDC::put);
@@ -186,7 +239,13 @@ public class JDAImpl implements JDA
 
     public ConcurrentMap<String, String> getContextMap()
     {
-        return contextMap;
+        return contextMap == null ? null : new ConcurrentHashMap<>(contextMap);
+    }
+
+    public void setContext()
+    {
+        if (contextMap != null)
+            contextMap.forEach(MDC::put);
     }
 
     public void setStatus(Status status)
@@ -267,6 +326,7 @@ public class JDAImpl implements JDA
         }
 
         userResponse = checkToken(login);
+        shutdownNow();
 
         //If the response isn't null (thus it didn't 401) send it to the secondary verify method to determine
         // which account type the developer wrongly attempted to login as
@@ -331,6 +391,7 @@ public class JDAImpl implements JDA
     public void setAutoReconnect(boolean autoReconnect)
     {
         this.autoReconnect = autoReconnect;
+        WebSocketClient client = getClient();
         if (client != null)
             client.setAutoReconnect(autoReconnect);
     }
@@ -360,15 +421,34 @@ public class JDAImpl implements JDA
     }
 
     @Override
+    public JDA awaitStatus(Status status) throws InterruptedException
+    {
+        Checks.notNull(status, "Status");
+        Checks.check(status.isInit(), "Cannot await the status %s as it is not part of the login cycle!", status);
+        if (getStatus() == Status.CONNECTED)
+            return this;
+        while (!getStatus().isInit()                         // JDA might disconnect while starting
+                || getStatus().ordinal() < status.ordinal()) // Wait until status is bypassed
+        {
+            if (getStatus() == Status.SHUTDOWN)
+                throw new IllegalStateException("Was shutdown trying to await status");
+            Thread.sleep(50);
+        }
+        return this;
+    }
+
+    @Override
     public List<String> getCloudflareRays()
     {
-        return Collections.unmodifiableList(new LinkedList<>(client.getCfRays()));
+        WebSocketClient client = getClient();
+        return client == null ? Collections.emptyList() : Collections.unmodifiableList(new LinkedList<>(client.getCfRays()));
     }
 
     @Override
     public List<String> getWebSocketTrace()
     {
-        return Collections.unmodifiableList(new LinkedList<>(client.getTraces()));
+        WebSocketClient client = getClient();
+        return client == null ? Collections.emptyList() : Collections.unmodifiableList(new LinkedList<>(client.getTraces()));
     }
 
     @Override
@@ -482,34 +562,42 @@ public class JDAImpl implements JDA
     }
 
     @Override
-    public void shutdownNow()
+    public synchronized void shutdownNow()
     {
         shutdown();
-
-        pool.shutdownNow();
-        getRequester().shutdownNow();
+        if (shutdownRateLimitPool)
+            getRateLimitPool().shutdownNow();
+        if (shutdownGatewayPool)
+            getGatewayPool().shutdownNow();
+        if (shutdownCallbackPool)
+            getCallbackPool().shutdownNow();
     }
 
     @Override
-    public void shutdown()
+    public synchronized void shutdown()
     {
         if (status == Status.SHUTDOWN || status == Status.SHUTTING_DOWN)
             return;
 
         setStatus(Status.SHUTTING_DOWN);
-        audioManagers.forEach(AudioManager::closeAudioConnection);
-        audioManagers.clear();
 
-        if (audioKeepAlivePool != null)
-            audioKeepAlivePool.shutdownNow();
+        WebSocketClient client = getClient();
+        if (client != null)
+            client.shutdown();
 
-        getClient().shutdown();
+        shutdownInternals();
+    }
 
-        final long time = 5L;
-        final TimeUnit unit = TimeUnit.SECONDS;
-        getRequester().shutdown(time, unit);
-        pool.setKeepAliveTime(time, unit);
-        pool.allowCoreThreadTimeOut(true);
+    public synchronized void shutdownInternals()
+    {
+        if (status == Status.SHUTDOWN)
+            return;
+        //so we can shutdown from WebSocketClient properly
+        closeAudioConnections();
+        guildSetupController.close();
+
+        getRequester().shutdown();
+        shutdownPools();
 
         if (shutdownHook != null)
         {
@@ -521,6 +609,42 @@ public class JDAImpl implements JDA
         }
 
         setStatus(Status.SHUTDOWN);
+    }
+
+    private void shutdownPools()
+    {
+        if (audioLifeCyclePool != null)
+            audioLifeCyclePool.shutdownNow();
+        if (shutdownGatewayPool)
+            getGatewayPool().shutdown();
+        if (shutdownCallbackPool)
+            getCallbackPool().shutdown();
+        if (shutdownRateLimitPool)
+        {
+            ScheduledExecutorService rateLimitPool = getRateLimitPool();
+            if (rateLimitPool instanceof ScheduledThreadPoolExecutor)
+            {
+                ScheduledThreadPoolExecutor executor = (ScheduledThreadPoolExecutor) rateLimitPool;
+                executor.setKeepAliveTime(5L, TimeUnit.SECONDS);
+                executor.allowCoreThreadTimeOut(true);
+            }
+            else
+            {
+                rateLimitPool.shutdown();
+            }
+        }
+    }
+
+    private void closeAudioConnections()
+    {
+        TLongObjectMap<AudioManager> managerMap = getAudioManagerMap();
+        synchronized (managerMap)
+        {
+            managerMap.valueCollection().stream()
+                      .map(AudioManagerImpl.class::cast)
+                      .forEach(m -> m.closeAudioConnection(ConnectionStatus.SHUTTING_DOWN));
+            managerMap.clear();
+        }
     }
 
     @Override
@@ -561,6 +685,12 @@ public class JDAImpl implements JDA
         return presence;
     }
 
+    @Override
+    public IEventManager getEventManager()
+    {
+        return eventManager;
+    }
+
     //@Override
     //public AuditableRestAction<Void> installAuxiliaryCable(int port) throws UnsupportedOperationException
     //{
@@ -576,7 +706,7 @@ public class JDAImpl implements JDA
     @Override
     public void setEventManager(IEventManager eventManager)
     {
-        this.eventManager = eventManager;
+        this.eventManager = eventManager == null ? new InterfacedEventManager() : eventManager;
     }
 
     @Override
@@ -619,14 +749,36 @@ public class JDAImpl implements JDA
         return new GuildAction(this, name);
     }
 
+    @Override
+    public RestAction<Webhook> getWebhookById(String webhookId)
+    {
+        Checks.isSnowflake(webhookId, "Webhook ID");
+
+        Route.CompiledRoute route = Route.Webhooks.GET_WEBHOOK.compile(webhookId);
+
+        return new RestAction<Webhook>(this, route)
+        {
+            @Override
+            protected void handleResponse(Response response, Request<Webhook> request)
+            {
+                if (!response.isOk())
+                {
+                    request.onFailure(response);
+                    return;
+                }
+
+                JSONObject object = response.getObject();
+                EntityBuilder builder = api.get().getEntityBuilder();
+                Webhook webhook = builder.createWebhook(object);
+
+                request.onSuccess(webhook);
+            }
+        };
+    }
+
     public EntityBuilder getEntityBuilder()
     {
         return entityBuilder;
-    }
-
-    public GuildLock getGuildLock()
-    {
-        return this.guildLock;
     }
 
     public IAudioSendFactory getAudioSendFactory()
@@ -650,11 +802,6 @@ public class JDAImpl implements JDA
         return requester;
     }
 
-    public IEventManager getEventManager()
-    {
-        return eventManager;
-    }
-
     public WebSocketFactory getWebSocketFactory()
     {
         return wsFactory;
@@ -662,7 +809,7 @@ public class JDAImpl implements JDA
 
     public WebSocketClient getClient()
     {
-        return client;
+        return client == null ? null : client.get();
     }
 
     public TLongObjectMap<User> getUserMap()
@@ -733,44 +880,48 @@ public class JDAImpl implements JDA
         return eventCache;
     }
 
-    public OkHttpClient.Builder getHttpClientBuilder()
+    public OkHttpClient getHttpClient()
     {
-        return httpClientBuilder;
-    }
-
-    private class JDAThreadFactory implements ThreadFactory
-    {
-        @Override
-        public Thread newThread(Runnable r)
-        {
-            final Thread thread = new Thread(() ->
-            {
-                if (contextMap != null)
-                    MDC.setContextMap(contextMap);
-                r.run();
-            }, "JDA-Thread " + getIdentifierString());
-            thread.setDaemon(true);
-            return thread;
-        }
-    }
-
-    public ScheduledThreadPoolExecutor getAudioKeepAlivePool()
-    {
-        ScheduledThreadPoolExecutor akap = audioKeepAlivePool;
-        if (akap == null)
-        {
-            synchronized (akapLock)
-            {
-                akap = audioKeepAlivePool;
-                if (akap == null)
-                    akap = audioKeepAlivePool = new ScheduledThreadPoolExecutor(1, new AudioWebSocket.KeepAliveThreadFactory(this));
-            }
-        }
-        return akap;
+        return httpClient;
     }
 
     public String getGatewayUrl()
     {
         return gatewayUrl;
+    }
+
+    public void resetGatewayUrl()
+    {
+        this.gatewayUrl = getGateway();
+    }
+
+    public ScheduledThreadPoolExecutor getAudioLifeCyclePool()
+    {
+        ScheduledThreadPoolExecutor pool = audioLifeCyclePool;
+        if (pool == null)
+        {
+            synchronized (audioLifeCycleLock)
+            {
+                pool = audioLifeCyclePool;
+                if (pool == null)
+                    pool = audioLifeCyclePool = newScheduler(1, "AudioLifeCycle");
+            }
+        }
+        return pool;
+    }
+
+    public ScheduledExecutorService getRateLimitPool()
+    {
+        return rateLimitPool;
+    }
+
+    public ScheduledExecutorService getGatewayPool()
+    {
+        return gatewayPool;
+    }
+
+    public ExecutorService getCallbackPool()
+    {
+        return callbackPool;
     }
 }

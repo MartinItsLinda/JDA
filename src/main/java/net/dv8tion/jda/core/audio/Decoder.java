@@ -38,15 +38,15 @@ public class Decoder
         this.lastSeq = (char) -1;
         this.lastTimestamp = -1;
 
-        IntBuffer error = IntBuffer.allocate(4);
-        opusDecoder = Opus.INSTANCE.opus_decoder_create(AudioConnection.OPUS_SAMPLE_RATE,
-                AudioConnection.OPUS_CHANNEL_COUNT, error);
-        //TODO: check `error` for an error flag.
+        IntBuffer error = IntBuffer.allocate(1);
+        opusDecoder = Opus.INSTANCE.opus_decoder_create(AudioConnection.OPUS_SAMPLE_RATE, AudioConnection.OPUS_CHANNEL_COUNT, error);
+        if (error.get() != Opus.OPUS_OK && opusDecoder == null)
+            throw new IllegalStateException("Received error code from opus_decoder_create(...): " + error.get());
     }
 
     protected boolean isInOrder(char newSeq)
     {
-        return lastSeq == -1 || newSeq > lastSeq || lastSeq - newSeq > 10;
+        return lastSeq == (char) -1 || newSeq > lastSeq || lastSeq - newSeq > 10;
     }
 
     protected boolean wasPacketLost(char newSeq)
@@ -60,15 +60,13 @@ public class Decoder
         ShortBuffer decoded = ShortBuffer.allocate(4096);
         if (decryptedPacket == null)    //Flag for packet-loss
         {
-            result = Opus.INSTANCE.opus_decode(opusDecoder, null, 0, decoded,
-                    AudioConnection.OPUS_FRAME_SIZE, 0);
+            result = Opus.INSTANCE.opus_decode(opusDecoder, null, 0, decoded, AudioConnection.OPUS_FRAME_SIZE, 0);
             lastSeq = (char) -1;
             lastTimestamp = -1;
         }
         else
         {
-            char seq = decryptedPacket.getSequence();
-            this.lastSeq = seq;
+            this.lastSeq = decryptedPacket.getSequence();
             this.lastTimestamp = decryptedPacket.getTimestamp();
 
             byte[] encodedAudio = decryptedPacket.getEncodedAudio();
@@ -78,7 +76,7 @@ public class Decoder
         }
 
         //If we get a result that is less than 0, then there was an error. Return null as a signifier.
-        if (result < Opus.OPUS_OK)
+        if (result < 0)
         {
             handleDecodeError(result);
             return null;
@@ -131,6 +129,7 @@ public class Decoder
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     protected void finalize() throws Throwable
     {
         super.finalize();

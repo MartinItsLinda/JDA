@@ -82,7 +82,9 @@ import net.dv8tion.jda.core.events.role.RoleCreateEvent;
 import net.dv8tion.jda.core.events.role.RoleDeleteEvent;
 import net.dv8tion.jda.core.events.role.update.*;
 import net.dv8tion.jda.core.events.self.*;
-import net.dv8tion.jda.core.events.user.*;
+import net.dv8tion.jda.core.events.user.GenericUserEvent;
+import net.dv8tion.jda.core.events.user.UserTypingEvent;
+import net.dv8tion.jda.core.events.user.update.*;
 
 /**
  * An abstract implementation of {@link net.dv8tion.jda.core.hooks.EventListener EventListener} which divides {@link net.dv8tion.jda.core.events.Event Events}
@@ -112,6 +114,7 @@ import net.dv8tion.jda.core.events.user.*;
 public abstract class ListenerAdapter implements EventListener
 {
     public void onGenericEvent(Event event) {}
+    public void onGenericUpdate(UpdateEvent<?, ?> event) {}
 
     //JDA Events
     public void onReady(ReadyEvent event) {}
@@ -123,10 +126,11 @@ public abstract class ListenerAdapter implements EventListener
     public void onException(ExceptionEvent event) {}
 
     //User Events
-    public void onUserNameUpdate(UserNameUpdateEvent event) {}
-    public void onUserAvatarUpdate(UserAvatarUpdateEvent event) {}
-    public void onUserOnlineStatusUpdate(UserOnlineStatusUpdateEvent event) {}
-    public void onUserGameUpdate(UserGameUpdateEvent event) {}
+    public void onUserUpdateName(UserUpdateNameEvent event) {}
+    public void onUserUpdateDiscriminator(UserUpdateDiscriminatorEvent event) {}
+    public void onUserUpdateAvatar(UserUpdateAvatarEvent event) {}
+    public void onUserUpdateOnlineStatus(UserUpdateOnlineStatusEvent event) {}
+    public void onUserUpdateGame(UserUpdateGameEvent event) {}
     public void onUserTyping(UserTypingEvent event) {}
 
     //Self Events. Fires only in relation to the currently logged in account.
@@ -172,6 +176,7 @@ public abstract class ListenerAdapter implements EventListener
     public void onTextChannelUpdatePermissions(TextChannelUpdatePermissionsEvent event) {}
     public void onTextChannelUpdateNSFW(TextChannelUpdateNSFWEvent event) {}
     public void onTextChannelUpdateParent(TextChannelUpdateParentEvent event) {}
+    public void onTextChannelUpdateSlowmode(TextChannelUpdateSlowmodeEvent event) {}
     public void onTextChannelCreate(TextChannelCreateEvent event) {}
 
     //VoiceChannel Events
@@ -196,6 +201,7 @@ public abstract class ListenerAdapter implements EventListener
     public void onPrivateChannelDelete(PrivateChannelDeleteEvent event) {}
 
     //Guild Events
+    public void onGuildReady(GuildReadyEvent event) {}
     public void onGuildJoin(GuildJoinEvent event) {}
     public void onGuildLeave(GuildLeaveEvent event) {}
     public void onGuildAvailable(GuildAvailableEvent event) {}
@@ -351,6 +357,8 @@ public abstract class ListenerAdapter implements EventListener
     public final void onEvent(Event event)
     {
         onGenericEvent(event);
+        if (event instanceof UpdateEvent)
+            onGenericUpdate((UpdateEvent<?, ?>) event);
         //JDA Events
         if (event instanceof ReadyEvent)
             onReady((ReadyEvent) event);
@@ -417,14 +425,16 @@ public abstract class ListenerAdapter implements EventListener
             onMessageReactionRemoveAll((MessageReactionRemoveAllEvent) event);
 
         //User Events
-        else if (event instanceof UserNameUpdateEvent)
-            onUserNameUpdate((UserNameUpdateEvent) event);
-        else if (event instanceof UserAvatarUpdateEvent)
-            onUserAvatarUpdate((UserAvatarUpdateEvent) event);
-        else if (event instanceof UserGameUpdateEvent)
-            onUserGameUpdate((UserGameUpdateEvent) event);
-        else if (event instanceof UserOnlineStatusUpdateEvent)
-            onUserOnlineStatusUpdate((UserOnlineStatusUpdateEvent) event);
+        else if (event instanceof UserUpdateNameEvent)
+            onUserUpdateName((UserUpdateNameEvent) event);
+        else if (event instanceof UserUpdateDiscriminatorEvent)
+            onUserUpdateDiscriminator((UserUpdateDiscriminatorEvent) event);
+        else if (event instanceof UserUpdateAvatarEvent)
+            onUserUpdateAvatar((UserUpdateAvatarEvent) event);
+        else if (event instanceof UserUpdateGameEvent)
+            onUserUpdateGame((UserUpdateGameEvent) event);
+        else if (event instanceof UserUpdateOnlineStatusEvent)
+            onUserUpdateOnlineStatus((UserUpdateOnlineStatusEvent) event);
         else if (event instanceof UserTypingEvent)
             onUserTyping((UserTypingEvent) event);
 
@@ -455,6 +465,8 @@ public abstract class ListenerAdapter implements EventListener
             onTextChannelUpdateNSFW((TextChannelUpdateNSFWEvent) event);
         else if (event instanceof TextChannelUpdateParentEvent)
             onTextChannelUpdateParent((TextChannelUpdateParentEvent) event);
+        else if (event instanceof TextChannelUpdateSlowmodeEvent)
+            onTextChannelUpdateSlowmode((TextChannelUpdateSlowmodeEvent) event);
         else if (event instanceof TextChannelDeleteEvent)
         onTextChannelDelete((TextChannelDeleteEvent) event);
 
@@ -495,6 +507,8 @@ public abstract class ListenerAdapter implements EventListener
             onPrivateChannelDelete((PrivateChannelDeleteEvent) event);
 
         //Guild Events
+        else if (event instanceof GuildReadyEvent)
+            onGuildReady((GuildReadyEvent) event);
         else if (event instanceof GuildJoinEvent)
             onGuildJoin((GuildJoinEvent) event);
         else if (event instanceof GuildLeaveEvent)

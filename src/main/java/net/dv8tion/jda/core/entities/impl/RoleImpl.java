@@ -24,53 +24,54 @@ import net.dv8tion.jda.core.entities.Role;
 import net.dv8tion.jda.core.exceptions.HierarchyException;
 import net.dv8tion.jda.core.exceptions.InsufficientPermissionException;
 import net.dv8tion.jda.core.managers.RoleManager;
-import net.dv8tion.jda.core.managers.RoleManagerUpdatable;
 import net.dv8tion.jda.core.requests.Request;
 import net.dv8tion.jda.core.requests.Response;
 import net.dv8tion.jda.core.requests.Route;
 import net.dv8tion.jda.core.requests.restaction.AuditableRestAction;
 import net.dv8tion.jda.core.requests.restaction.RoleAction;
-import net.dv8tion.jda.core.utils.PermissionUtil;
 import net.dv8tion.jda.core.utils.Checks;
+import net.dv8tion.jda.core.utils.MiscUtil;
+import net.dv8tion.jda.core.utils.PermissionUtil;
+import net.dv8tion.jda.core.utils.cache.UpstreamReference;
 
 import java.awt.Color;
 import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class RoleImpl implements Role
 {
     private final long id;
-    private final Guild guild;
+    private final UpstreamReference<Guild> guild;
 
-    private final Object mngLock = new Object();
+    private final ReentrantLock mngLock = new ReentrantLock();
     private volatile RoleManager manager;
-    private volatile RoleManagerUpdatable managerUpdatable;
 
     private String name;
-    private Color color;
     private boolean managed;
     private boolean hoisted;
     private boolean mentionable;
     private long rawPermissions;
+    private int color;
     private int rawPosition;
 
     public RoleImpl(long id, Guild guild)
     {
         this.id = id;
-        this.guild = guild;
+        this.guild = new UpstreamReference<>(guild);
     }
 
     @Override
     public int getPosition()
     {
-        if (this == guild.getPublicRole())
+        if (this == getGuild().getPublicRole())
             return -1;
 
         //Subtract 1 to get into 0-index, and 1 to disregard the everyone role.
-        int i = guild.getRoles().size() - 2;
-        for (Role r : guild.getRoles())
+        int i = getGuild().getRoles().size() - 2;
+        for (Role r : getGuild().getRoles())
         {
             if (r == this)
                 return i;
@@ -125,6 +126,12 @@ public class RoleImpl implements Role
     @Override
     public Color getColor()
     {
+        return color != Role.DEFAULT_COLOR_RAW ? new Color(color) : null;
+    }
+
+    @Override
+    public int getColorRaw()
+    {
         return color;
     }
 
@@ -137,7 +144,7 @@ public class RoleImpl implements Role
     @Override
     public boolean hasPermission(Permission... permissions)
     {
-        long effectivePerms = rawPermissions | guild.getPublicRole().getPermissionsRaw();
+        long effectivePerms = rawPermissions | getGuild().getPublicRole().getPermissionsRaw();
         for (Permission perm : permissions)
         {
             final long rawValue = perm.getRawValue();
@@ -152,7 +159,7 @@ public class RoleImpl implements Role
     {
         Checks.notNull(permissions, "Permission Collection");
 
-        return hasPermission(permissions.toArray(new Permission[permissions.size()]));
+        return hasPermission(permissions.toArray(Permission.EMPTY_PERMISSIONS));
     }
 
     @Override
@@ -173,7 +180,7 @@ public class RoleImpl implements Role
     {
         Checks.notNull(permissions, "Permission Collection");
 
-        return hasPermission(channel, permissions.toArray(new Permission[permissions.size()]));
+        return hasPermission(channel, permissions.toArray(Permission.EMPTY_PERMISSIONS));
     }
 
     @Override
@@ -185,7 +192,7 @@ public class RoleImpl implements Role
     @Override
     public Guild getGuild()
     {
-        return guild;
+        return guild.get();
     }
 
     @Override
@@ -206,28 +213,12 @@ public class RoleImpl implements Role
         RoleManager mng = manager;
         if (mng == null)
         {
-            synchronized (mngLock)
+            mng = MiscUtil.locked(mngLock, () ->
             {
-                mng = manager;
-                if (mng == null)
-                    mng = manager = new RoleManager(this);
-            }
-        }
-        return mng;
-    }
-
-    @Override
-    public RoleManagerUpdatable getManagerUpdatable()
-    {
-        RoleManagerUpdatable mng = managerUpdatable;
-        if (mng == null)
-        {
-            synchronized (mngLock)
-            {
-                mng = managerUpdatable;
-                if (mng == null)
-                    mng = managerUpdatable = new RoleManagerUpdatable(this);
-            }
+                if (manager == null)
+                    manager = new RoleManager(this);
+                return manager;
+            });
         }
         return mng;
     }
@@ -242,7 +233,7 @@ public class RoleImpl implements Role
         if (managed)
             throw new UnsupportedOperationException("Cannot delete a Role that is managed. ");
 
-        Route.CompiledRoute route = Route.Roles.DELETE_ROLE.compile(guild.getId(), getId());
+        Route.CompiledRoute route = Route.Roles.DELETE_ROLE.compile(getGuild().getId(), getId());
         return new AuditableRestAction<Void>(getJDA(), route)
         {
             @Override
@@ -259,13 +250,13 @@ public class RoleImpl implements Role
     @Override
     public JDA getJDA()
     {
-        return guild.getJDA();
+        return getGuild().getJDA();
     }
 
     @Override
     public String getAsMention()
     {
-        return "<@&" + getId() + '>';
+        return isPublicRole() ? "@everyone" : "<@&" + getId() + '>';
     }
 
     @Override
@@ -324,7 +315,7 @@ public class RoleImpl implements Role
         return this;
     }
 
-    public RoleImpl setColor(Color color)
+    public RoleImpl setColor(int color)
     {
         this.color = color;
         return this;

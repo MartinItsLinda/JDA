@@ -160,8 +160,8 @@ public class PermissionUtil
             }
         }
 
-        return (emote.getRoles().isEmpty() // Emote restricted to roles -> check if the issuer has them
-                    || CollectionUtils.containsAny(issuer.getRoles(), emote.getRoles()));
+        return emote.canProvideRoles() && (emote.getRoles().isEmpty() // Emote restricted to roles -> check if the issuer has them
+            || CollectionUtils.containsAny(issuer.getRoles(), emote.getRoles()));
     }
 
     /**
@@ -189,7 +189,7 @@ public class PermissionUtil
         Checks.notNull(emote,   "Target Emote");
         Checks.notNull(channel, "Target Channel");
 
-        if (emote.isFake() || !emote.getGuild().isMember(issuer))
+        if (emote.getGuild() == null || !emote.getGuild().isMember(issuer))
             return false; // cannot use an emote if you're not in its guild
         Member member = emote.getGuild().getMemberById(issuer.getIdLong());
         if (!canInteract(member, emote))
@@ -643,6 +643,6 @@ public class PermissionUtil
     private static void checkGuild(Guild o1, Guild o2, String name)
     {
         Checks.check(o1.equals(o2),
-            "Specified %s is not in the same guild! (%s / %s)", name, o1.toString(), o2.toString());
+            "Specified %s is not in the same guild! (%s / %s)", name, o1, o2);
     }
 }

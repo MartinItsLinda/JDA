@@ -16,12 +16,14 @@
 
 package net.dv8tion.jda.core.entities;
 
+import net.dv8tion.jda.annotations.Incubating;
 import net.dv8tion.jda.core.utils.Checks;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.time.Instant;
 import java.time.temporal.TemporalUnit;
+import java.util.EnumSet;
 import java.util.Objects;
 
 /**
@@ -37,21 +39,25 @@ public class RichPresence extends Game
     protected final Party party;
     protected final String details;
     protected final String state;
-    protected final Timestamps timestamps;
     protected final Image largeImage;
     protected final Image smallImage;
+    protected final String sessionId;
+    protected final String syncId;
+    protected final int flags;
 
     protected RichPresence(
         GameType type, String name, String url, long applicationId,
-        Party party, String details, String state, Timestamps timestamps,
+        Party party, String details, String state, Timestamps timestamps, String syncId, String sessionId, int flags,
         String largeImageKey, String largeImageText, String smallImageKey, String smallImageText)
     {
-        super(name, url, type);
+        super(name, url, type, timestamps);
         this.applicationId = applicationId;
         this.party = party;
         this.details = details;
         this.state = state;
-        this.timestamps = timestamps;
+        this.sessionId = sessionId;
+        this.syncId = syncId;
+        this.flags = flags;
         this.largeImage = largeImageKey != null ? new Image(largeImageKey, largeImageText) : null;
         this.smallImage = smallImageKey != null ? new Image(smallImageKey, smallImageText) : null;
     }
@@ -90,6 +96,56 @@ public class RichPresence extends Game
     }
 
     /**
+     * Session ID for this presence.
+     * <br>Used by spotify integration.
+     *
+     * @return Session ID
+     */
+    @Nullable
+    public String getSessionId()
+    {
+        return sessionId;
+    }
+
+    /**
+     * Sync ID for this presence.
+     * <br>Used by spotify integration.
+     *
+     * @return Sync ID
+     */
+    @Nullable
+    public String getSyncId()
+    {
+        return syncId;
+    }
+
+    /**
+     * Flags for this presence
+     *
+     * @return The flags for this presence
+     *
+     * @see    ActivityFlag
+     * @see    ActivityFlag#getFlags(int)
+     */
+    public int getFlags()
+    {
+        return flags;
+    }
+
+    /**
+     * Flags for this presence in an enum set
+     *
+     * @return The flags for this presence
+     *
+     * @see    ActivityFlag
+     * @see    ActivityFlag#getFlags(int)
+     */
+    public EnumSet<ActivityFlag> getFlagSet()
+    {
+        return ActivityFlag.getFlags(getFlags());
+    }
+
+    /**
      * The user's current party status
      * <br>Example: "Looking to Play", "Playing Solo", "In a Group"
      *
@@ -125,17 +181,6 @@ public class RichPresence extends Game
     }
 
     /**
-     * Information on the match duration, start, and end.
-     *
-     * @return {@link net.dv8tion.jda.core.entities.RichPresence.Timestamps Timestamps} wrapper of {@code null} if unset
-     */
-    @Nullable
-    public Timestamps getTimestamps()
-    {
-        return timestamps;
-    }
-
-    /**
      * Information on the large image displayed in the profile view
      *
      * @return {@link net.dv8tion.jda.core.entities.RichPresence.Image Image} wrapper or {@code null} if unset
@@ -166,7 +211,7 @@ public class RichPresence extends Game
     @Override
     public int hashCode()
     {
-        return Objects.hash(applicationId, state, details, party, timestamps, largeImage, smallImage);
+        return Objects.hash(applicationId, state, details, party, sessionId, syncId, flags, timestamps, largeImage, smallImage);
     }
 
     @Override
@@ -184,6 +229,9 @@ public class RichPresence extends Game
             && Objects.equals(state, p.state)
             && Objects.equals(details, p.details)
             && Objects.equals(party, p.party)
+            && Objects.equals(sessionId, p.sessionId)
+            && Objects.equals(syncId, p.syncId)
+            && Objects.equals(flags, p.flags)
             && Objects.equals(timestamps, p.timestamps)
             && Objects.equals(largeImage, p.largeImage)
             && Objects.equals(smallImage, p.smallImage);
@@ -233,6 +281,10 @@ public class RichPresence extends Game
         @Nonnull
         public String getUrl()
         {
+            if (key.startsWith("spotify:"))
+                return "https://i.scdn.co/image/" + key.substring("spotify:".length());
+            if (key.startsWith("twitch:"))
+                return String.format("https://static-cdn.jtvnw.net/previews-ttv/live_user_%s-1920x1080.png", key.substring("twitch:".length()));
             return "https://cdn.discordapp.com/app-assets/" + applicationId + "/" + key + ".png";
         }
 
@@ -425,7 +477,10 @@ public class RichPresence extends Game
          * The current size of this party, or {@code 0} if unset
          *
          * @return The current size of this party, or {@code 0} if unset
+         *
+         * @incubating The return type for this method will change to {@code long} for compatibility
          */
+        @Incubating
         public int getSize()
         {
             return (int)size;
@@ -445,7 +500,10 @@ public class RichPresence extends Game
          * The maximum size of this party, or {@code 0} if unset
          *
          * @return The maximum size of this party, or {@code 0} if unset
+         *
+         * @incubating The return type for this method will change to {@code long} for compatibility
          */
+        @Incubating
         public int getMax()
         {
             return (int)max;
